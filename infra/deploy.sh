@@ -291,10 +291,12 @@ make_change_set() {
 }
 
 # recreates_instance <change set>: the change set may replace the instance (any property needing recreation).
+# UserData reports "Conditionally" but only stops and starts an EBS-backed instance, so it does not count.
 recreates_instance() {
   aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$1" --output json | jq -e \
-    '[.Changes[].ResourceChange | select(.LogicalResourceId == "Instance") | .Details[].Target.RequiresRecreation
-      | select(. != "Never")] | length > 0' >/dev/null
+    '[.Changes[].ResourceChange | select(.LogicalResourceId == "Instance") | .Details[].Target
+      | select(.RequiresRecreation == "Always" or (.RequiresRecreation == "Conditionally" and .Name != "UserData"))]
+     | length > 0' >/dev/null
 }
 
 plan() {
