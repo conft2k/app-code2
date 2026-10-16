@@ -23,7 +23,7 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_STACK                  stack name, lowercase (default code2)
   CODE2_ACCOUNT                refuse to run with credentials for any other account
   AWS_REGION                   default: AWS_DEFAULT_REGION, the profile's region, then ap-northeast-2
-  CODE2_INSTANCE_TYPE          default t4g.large; Graviton or x86 (another architecture replaces the instance)
+  CODE2_INSTANCE_TYPE          default t4g.medium; Graviton or x86 (another architecture replaces the instance)
   CODE2_DATA_SIZE              /home GiB (default 50, grow only)
   CODE2_ROOT_SIZE              root GiB (default 30, a change replaces the instance)
   CODE2_CODE_SERVER_VERSION    code-server version (a change restarts the instance)
@@ -171,7 +171,7 @@ preflight_create() {
 }
 
 params_create() {
-  local type=${CODE2_INSTANCE_TYPE:-t4g.large} arch ami az="${CODE2_AZ:-}" pair k v vpc eice zone cert pl
+  local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v vpc eice zone cert pl
   [ -n "${CODE2_ADMIN_EMAIL:-}" ] || die "set CODE2_ADMIN_EMAIL (the temporary password goes there)"
   arch=$(arch_of "$type"); [ -n "$arch" ] || die "unknown instance type $type in $AWS_REGION"
   ami=$(latest_ami "$arch"); param ImageId "$ami"
