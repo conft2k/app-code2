@@ -15,7 +15,7 @@ Metadata:
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
                      OAuth2ProxyVersion, AutoUpdates, IdleStopHours]
       - Label: { default: Operations }
-        Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot]
+        Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot]
       - Label: { default: Network (create-time) }
         Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
                      ExistingEiceId, ExistingEiceSecurityGroupId]
@@ -151,6 +151,14 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+$"
     Description: Optional address for CloudWatch alarms (instance status, disk usage, setup failures); confirm the SNS mail
+  OriginSlot:
+    Type: String
+    Default: a
+    AllowedValues: [a, b]
+    Description: >-
+      Which of two VPC origins the distribution uses. A VPC origin in use cannot move to another instance, so an
+      update that replaces the instance flips the slot (deploy.sh does it): a new origin for the new instance, then
+      the old one is deleted once the distribution has moved over.
   WaitForBoot:
     Type: String
     Default: "true"
@@ -198,6 +206,8 @@ Conditions:
   HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
   WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
+  OriginSlotA: !Equals [!Ref OriginSlot, a]
+  OriginSlotB: !Equals [!Ref OriginSlot, b]
   # T families (t3, t3a, t4g) are the burstable ones: "t4g" split on "t" starts with an empty string.
   IsBurstable: !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
 
@@ -1003,12 +1013,26 @@ Resources:
       AlarmActions: [!Ref AlarmTopic]
 
   # ---------- edge ----------
+  # Two slots (see OriginSlot): slot a keeps the original logical id so existing stacks keep their origin.
   InstanceVpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
+    Condition: OriginSlotA
     DependsOn: NetworkReady
     Properties:
       VpcOriginEndpointConfig:
         Name: !Sub "${AWS::StackName}-vpco-ec2"
+        Arn: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}"
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  InstanceVpcOriginB:
+    Type: AWS::CloudFront::VpcOrigin
+    Condition: OriginSlotB
+    DependsOn: NetworkReady
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${AWS::StackName}-vpco-ec2-b"
         Arn: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}"
         HTTPPort: 80
         HTTPSPort: 443
@@ -1032,7 +1056,7 @@ Resources:
           - Id: code2-ec2
             DomainName: !GetAtt Instance.PrivateDnsName
             VpcOriginConfig:
-              VpcOriginId: !GetAtt InstanceVpcOrigin.Id
+              VpcOriginId: !If [OriginSlotA, !GetAtt InstanceVpcOrigin.Id, !GetAtt InstanceVpcOriginB.Id]
               OriginReadTimeout: 60
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:

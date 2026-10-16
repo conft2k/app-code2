@@ -231,6 +231,7 @@ params_update() {
     elif [ "$k" = WaitForBoot ]; then param WaitForBoot false   # the running instance predates the boot signal
     fi
   done
+  if has OriginSlot; then keep OriginSlot; fi
   for v in CODE2_DOMAIN CODE2_AZ CODE2_VPC_ID CODE2_SUBNET_ID CODE2_RESTORE_SNAPSHOT; do
     [ -z "${!v:-}" ] || warn "$v only applies when the stack is created; ignored"
   done
@@ -259,8 +260,34 @@ legacy_template() {
 }
 
 # ---------- change sets ----------
+# make_change_set <type> <template> <kind>: creates change set $cs from $PARAMS; fails when it has no changes.
+make_change_set() {
+  local status reason
+  echo "$PARAMS" > "$TMP/params.json"
+  cs="$STACK-$(date -u +%Y%m%d-%H%M%S)-$RANDOM"
+  aws cloudformation create-change-set --stack-name "$STACK" --change-set-name "$cs" --change-set-type "$1" \
+    --template-body "file://$2" --capabilities CAPABILITY_IAM --tags Key=project,Value=code2 \
+    --parameters "file://$TMP/params.json" --description "code2 $3 sha256=$(sha256 "$2")" \
+    --query Id --output text >/dev/null
+  aws cloudformation wait change-set-create-complete --stack-name "$STACK" --change-set-name "$cs" 2>/dev/null || true
+  read -r status reason < <(aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$cs" \
+    --query '[Status,StatusReason]' --output text)
+  if [ "$status" = FAILED ]; then
+    aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$cs"
+    [[ "$reason" == *"didn't contain changes"* || "$reason" == *"No updates are to be performed"* ]] && return 1
+    die "change set failed: $reason"
+  fi
+}
+
+# recreates_instance <change set>: the change set may replace the instance (any property needing recreation).
+recreates_instance() {
+  aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$1" --output json | jq -e \
+    '[.Changes[].ResourceChange | select(.LogicalResourceId == "Instance") | .Details[].Target.RequiresRecreation
+      | select(. != "Never")] | length > 0' >/dev/null
+}
+
 plan() {
-  local type template kind status cs reason
+  local type template kind cs
   check_state
   case "$(stack_status)" in NONE|REVIEW_IN_PROGRESS|DELETE_COMPLETE) type=CREATE ;; *) type=UPDATE ;; esac
   template=$TEMPLATE kind=main
@@ -284,22 +311,21 @@ plan() {
     params_create
   fi
 
-  echo "$PARAMS" > "$TMP/params.json"
-  cs="$STACK-$(date -u +%Y%m%d-%H%M%S)"
-  aws cloudformation create-change-set --stack-name "$STACK" --change-set-name "$cs" --change-set-type "$type" \
-    --template-body "file://$template" --capabilities CAPABILITY_IAM --tags Key=project,Value=code2 \
-    --parameters "file://$TMP/params.json" --description "code2 $kind sha256=$(sha256 "$template")" \
-    --query Id --output text >/dev/null
-  aws cloudformation wait change-set-create-complete --stack-name "$STACK" --change-set-name "$cs" 2>/dev/null || true
-  read -r status reason < <(aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$cs" \
-    --query '[Status,StatusReason]' --output text)
-  if [ "$status" = FAILED ]; then
+  make_change_set "$type" "$template" "$kind" || { echo "no changes"; return 0; }
+
+  # A VPC origin in use cannot move to another instance: when the instance is recreated, plan again with the other
+  # origin slot, so CloudFormation makes a new origin, moves the distribution and deletes the old one.
+  if [ "$kind" = main ] && [ "$type" = UPDATE ] && recreates_instance "$cs"; then
+    local slot
+    slot=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+      --query "Stacks[0].Parameters[?ParameterKey=='OriginSlot'].ParameterValue" --output text)
+    [ "$slot" = b ] && slot=a || slot=b
+    echo "the instance is replaced: the distribution moves to VPC origin slot $slot"
     aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$cs"
-    if [[ "$reason" == *"didn't contain changes"* || "$reason" == *"No updates are to be performed"* ]]; then
-      echo "no changes"; return 0
-    fi
-    die "change set failed: $reason"
+    PARAMS=$(jq -c --arg s "$slot" 'map(select(.ParameterKey != "OriginSlot")) + [{ParameterKey: "OriginSlot", ParameterValue: $s}]' <<<"$PARAMS")
+    make_change_set "$type" "$template" "$kind" || die "the slot change set unexpectedly had no changes"
   fi
+
   echo "change set $cs ($type $STACK):"
   aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$cs" \
     --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' --output table
