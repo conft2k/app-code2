@@ -1,22 +1,68 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private Graviton EC2
-  (oauth2-proxy :80 signs in with Cognito + TOTP -> code-server 127.0.0.1:8080). Self-contained: its own VPC,
-  NAT gateway for egress and an EC2 Instance Connect Endpoint for SSH. A custom domain is optional; without
-  one the site is served on the distribution's *.cloudfront.net name. Deployed with infra/deploy.sh.
+  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private EC2
+  (oauth2-proxy :80 signs in with Cognito + TOTP -> code-server 127.0.0.1:8080). Self-contained by default: its own
+  VPC, NAT gateway for egress and an EC2 Instance Connect Endpoint for SSH; an existing VPC can be used instead.
+  A custom domain is optional; without one the site is served on the distribution's *.cloudfront.net name.
+  Deployed with infra/deploy.sh.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Sign-in }
+        Parameters: [AdminUsername, AdminEmail, SessionHours]
+      - Label: { default: Server }
+        Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
+                     OAuth2ProxyVersion, AutoUpdates, IdleStopHours]
+      - Label: { default: Operations }
+        Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot]
+      - Label: { default: Network (create-time) }
+        Parameters: [AvailabilityZone, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
+                     ExistingEiceId, ExistingEiceSecurityGroupId]
+      - Label: { default: Edge }
+        Parameters: [DomainName, HostedZoneId, CertificateArn, PriceClass]
 
 Parameters:
+  AvailabilityZone:
+    Type: String
+    Default: ""
+    Description: >-
+      AZ of the instance and its /home volume. Empty picks the region's first AZ (deploy.sh picks one that offers
+      InstanceType). Required with ExistingSubnetId (the subnet's AZ).
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
+    Description: CIDR of the new VPC, or of ExistingVpcId. Port 80 on the instance is open to it (CloudFront VPC origin ENIs).
   PublicSubnetCidr:
     Type: String
     Default: 10.42.0.0/24
-    Description: NAT gateway subnet
+    Description: NAT gateway subnet (new VPC only)
   PrivateSubnetCidr:
     Type: String
     Default: 10.42.1.0/24
-    Description: Instance and EC2 Instance Connect Endpoint subnet
+    Description: Instance and EC2 Instance Connect Endpoint subnet (new VPC only)
+  ExistingVpcId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^vpc-[0-9a-f]+$"
+    Description: >-
+      Optional existing VPC instead of a new one. It needs an internet gateway attached (CloudFront VPC origins
+      require one) and ExistingSubnetId must be a private subnet with internet egress (NAT).
+  ExistingSubnetId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^subnet-[0-9a-f]+$"
+    Description: Private subnet of ExistingVpcId for the instance (only with ExistingVpcId)
+  ExistingEiceId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^eice-[0-9a-f]+$"
+    Description: Use this EC2 Instance Connect Endpoint (one per VPC) instead of creating one
+  ExistingEiceSecurityGroupId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^sg-[0-9a-f]+$"
+    Description: Security group of ExistingEiceId; the instance allows SSH from it
   DomainName:
     Type: String
     Default: ""
@@ -30,28 +76,82 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
     Description: ACM certificate in us-east-1 covering DomainName (only with DomainName)
+  PriceClass:
+    Type: String
+    Default: PriceClass_200
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
   ImageId:
     Type: AWS::EC2::Image::Id
     Description: >-
-      AL2023 arm64 AMI. deploy.sh resolves the latest one on create and keeps the previous value on update
-      (a new AMI replaces the instance).
+      Amazon Linux 2023 AMI matching InstanceType's architecture (arm64 or x86_64). deploy.sh resolves the latest
+      one on create and keeps it on update unless asked to move on (a new AMI replaces the instance; /home stays).
   InstanceType:
     Type: String
     Default: t4g.large
-    AllowedValues: [t4g.medium, t4g.large, t4g.xlarge, m7g.large, m7g.xlarge, r8g.medium, r8g.large]
+    AllowedPattern: '^[a-z][a-z0-9-]*\.[a-z0-9]+$'
+    Description: Any type (Graviton or x86); ImageId must match its architecture
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    Description: GiB of the root volume (changing it replaces the instance; /home stays)
   DataVolumeSize:
     Type: Number
     Default: 50
     MinValue: 20
-    Description: GiB of the /home volume (kept as a snapshot when the stack deletes it)
+    Description: GiB of the /home volume (kept as a snapshot when the stack deletes it); can grow, never shrink
+  DataSnapshotId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^snap-[0-9a-f]+$"
+    Description: Create /home from this snapshot (a previous code2 /home); DataVolumeSize must be at least its size
   CodeServerVersion:
     Type: String
     Default: 4.139.1
     AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Changing it restarts the instance, which installs the new version on boot
   OAuth2ProxyVersion:
     Type: String
     Default: 7.15.5
     AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Changing it restarts the instance, which installs the new version on boot
+  AutoUpdates:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Daily security updates with dnf-automatic, following the latest AL2023 release (no automatic reboot)
+  IdleStopHours:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 72
+    Description: >-
+      Stop the instance after this many hours with no browser connection, SSH session or load (0 = never). An open
+      code2 tab counts as activity. Restart it with deploy.sh start.
+  SessionHours:
+    Type: Number
+    Default: 12
+    MinValue: 1
+    MaxValue: 168
+    Description: How long a sign-in lasts (Cognito refresh token and the oauth2-proxy cookie)
+  BackupRetainCount:
+    Type: Number
+    Default: 7
+    MinValue: 0
+    MaxValue: 1000
+    Description: Daily /home snapshots to keep (Data Lifecycle Manager, 03:00 KST); 0 turns backups off
+  AlarmEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+$"
+    Description: Optional address for CloudWatch alarms (instance status, disk usage, setup failures); confirm the SNS mail
+  WaitForBoot:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Create waits until the instance reports a working setup and rolls back otherwise. deploy.sh sets false for
+      stacks that predate this signal.
   AdminUsername:
     Type: String
     Default: admin
@@ -62,13 +162,44 @@ Parameters:
     AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
     Description: Where the temporary password goes
 
+Rules:
+  CustomDomain:
+    RuleCondition: !Not [!Equals [!Ref DomainName, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref HostedZoneId, ""]]
+        AssertDescription: DomainName needs HostedZoneId (its Route 53 public hosted zone)
+      - Assert: !Not [!Equals [!Ref CertificateArn, ""]]
+        AssertDescription: DomainName needs CertificateArn (an issued us-east-1 ACM certificate covering it)
+  ExistingNetwork:
+    RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingSubnetId, ""]]
+        AssertDescription: ExistingVpcId needs ExistingSubnetId (a private subnet with NAT egress)
+      - Assert: !Not [!Equals [!Ref AvailabilityZone, ""]]
+        AssertDescription: ExistingVpcId needs AvailabilityZone (the AZ of ExistingSubnetId)
+  ExistingEndpoint:
+    RuleCondition: !Not [!Equals [!Ref ExistingEiceId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingEiceSecurityGroupId, ""]]
+        AssertDescription: ExistingEiceId needs ExistingEiceSecurityGroupId
+
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
+  CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
+  CreateEice: !Equals [!Ref ExistingEiceId, ""]
+  HasSnapshot: !Not [!Equals [!Ref DataSnapshotId, ""]]
+  HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+  WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
+  # T families (t3, t3a, t4g) are the burstable ones: "t4g" split on "t" starts with an empty string.
+  IsBurstable: !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
 
 Resources:
-  # ---------- network ----------
+  # ---------- network (skipped with ExistingVpcId) ----------
   Vpc:
     Type: AWS::EC2::VPC
+    Condition: CreateNetwork
     Properties:
       CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
@@ -78,30 +209,35 @@ Resources:
   # CloudFront VPC origins require an internet gateway on the VPC; only the NAT gateway uses it.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
+    Condition: CreateNetwork
     Properties:
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
 
   GatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateNetwork
     Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
 
   PublicSubnet:
     Type: AWS::EC2::Subnet
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
       CidrBlock: !Ref PublicSubnetCidr
       MapPublicIpOnLaunch: false
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pub" }]
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pub" }]
 
   PublicDefaultRoute:
     Type: AWS::EC2::Route
+    Condition: CreateNetwork
     DependsOn: GatewayAttachment
     Properties:
       RouteTableId: !Ref PublicRouteTable
@@ -110,10 +246,12 @@ Resources:
 
   PublicSubnetRoutes:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNetwork
     Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRouteTable }
 
   NatEip:
     Type: AWS::EC2::EIP
+    Condition: CreateNetwork
     DependsOn: GatewayAttachment
     Properties:
       Domain: vpc
@@ -121,6 +259,7 @@ Resources:
 
   NatGateway:
     Type: AWS::EC2::NatGateway
+    Condition: CreateNetwork
     Properties:
       SubnetId: !Ref PublicSubnet
       AllocationId: !GetAtt NatEip.AllocationId
@@ -128,20 +267,23 @@ Resources:
 
   PrivateSubnet:
     Type: AWS::EC2::Subnet
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
       CidrBlock: !Ref PrivateSubnetCidr
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pri" }]
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pri" }]
 
   PrivateDefaultRoute:
     Type: AWS::EC2::Route
+    Condition: CreateNetwork
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -149,25 +291,36 @@ Resources:
 
   PrivateSubnetRoutes:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNetwork
     Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRouteTable }
 
   # Keeps dnf repos and other S3 traffic off the NAT gateway.
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       VpcEndpointType: Gateway
       ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
       RouteTableIds: [!Ref PrivateRouteTable]
 
+  # DependsOn cannot name a resource whose condition is false; this handle stands in for the network being ready
+  # (egress for the instance's downloads, the internet gateway for the VPC origin) in both network modes.
+  NetworkReady:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Route: !If [CreateNetwork, !Ref PrivateDefaultRoute, ""]
+      Association: !If [CreateNetwork, !Ref PrivateSubnetRoutes, ""]
+      Gateway: !If [CreateNetwork, !Ref GatewayAttachment, ""]
+
   # ---------- security groups ----------
   # :80 is open to the VPC range because CloudFront's VPC origin ENIs (CloudFront-VPCOrigins-Service-SG) only
-  # appear after the origin exists. Nothing else in this VPC listens or sends there: the EICE can only reach :22.
+  # appear after the origin exists. Nothing else this stack creates sends there: the EICE can only reach :22.
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: code2 EC2 - oauth2-proxy :80 from CloudFront (VPC origin), SSH from the EICE
-      VpcId: !Ref Vpc
+      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: CloudFront VPC origin }
       SecurityGroupEgress:
@@ -176,9 +329,10 @@ Resources:
 
   EiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: CreateEice
     Properties:
       GroupDescription: code2 EC2 Instance Connect Endpoint - SSH to the instance only
-      VpcId: !Ref Vpc
+      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 22, ToPort: 22, DestinationSecurityGroupId: !Ref InstanceSecurityGroup,
             Description: SSH to the code2 instance }
@@ -186,18 +340,23 @@ Resources:
 
   InstanceSshFromEice:
     Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
     Properties:
       GroupId: !Ref InstanceSecurityGroup
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      SourceSecurityGroupId: !Ref EiceSecurityGroup
+      SourceSecurityGroupId: !If [CreateEice, !Ref EiceSecurityGroup, !Ref ExistingEiceSecurityGroupId]
       Description: EC2 Instance Connect Endpoint
 
   InstanceConnectEndpoint:
     Type: AWS::EC2::InstanceConnectEndpoint
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    Condition: CreateEice
     Properties:
-      SubnetId: !Ref PrivateSubnet
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
       SecurityGroupIds: [!Ref EiceSecurityGroup]
       PreserveClientIp: false
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eice" }]
@@ -271,7 +430,7 @@ Resources:
       EnableTokenRevocation: true
       IdTokenValidity: 60
       AccessTokenValidity: 60
-      RefreshTokenValidity: 12
+      RefreshTokenValidity: !Ref SessionHours
       TokenValidityUnits: { IdToken: minutes, AccessToken: minutes, RefreshToken: hours }
 
   UserPoolDomain:
@@ -316,7 +475,7 @@ Resources:
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: code2 EC2 - SSM management, reads its own Cognito client secret and oauth2-proxy settings at boot
+      Description: code2 EC2 - SSM management, CloudWatch agent, attaches its /home volume, reads its own Cognito client secret
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -325,6 +484,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
       Policies:
         - PolicyName: code2-auth
           PolicyDocument:
@@ -344,25 +504,66 @@ Resources:
     Properties:
       Roles: [!Ref InstanceRole]
 
+  # The instance attaches /home itself at boot (no AWS::EC2::VolumeAttachment): a replacement instance waits until
+  # CloudFormation terminates the old one, then takes the volume over. Separate from the role so it can name the
+  # instance profile, which limits the attach to instances started with it.
+  VolumeAttachPolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref InstanceRole
+      PolicyName: code2-home-volume
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DescribeVolume
+            Effect: Allow
+            Action: ec2:DescribeVolumes
+            Resource: "*"
+          - Sid: AttachHomeVolume
+            Effect: Allow
+            Action: ec2:AttachVolume
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/${DataVolume}"
+          - Sid: ToThisInstanceProfileOnly
+            Effect: Allow
+            Action: ec2:AttachVolume
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals: { "ec2:InstanceProfile": !GetAtt InstanceProfile.Arn }
+
   # /home lives here so a replaced instance keeps the workspace. Deleting the stack leaves a snapshot.
   DataVolume:
     Type: AWS::EC2::Volume
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
     Properties:
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !If [HasAz, !Ref AvailabilityZone, !Select [0, !GetAZs ""]]
       Size: !Ref DataVolumeSize
+      SnapshotId: !If [HasSnapshot, !Ref DataSnapshotId, !Ref "AWS::NoValue"]
       VolumeType: gp3
       Encrypted: true
-      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ebs-home" }]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ebs-home" }
+        - { Key: code2-backup, Value: !Ref "AWS::StackName" }
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/code2/${AWS::StackName}"
+      RetentionInDays: 30
+
+  # Ref is a presigned URL the instance PUTs its first-boot result to (see BootWait).
+  BootWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
 
   Instance:
     Type: AWS::EC2::Instance
-    DependsOn: [PrivateDefaultRoute, PrivateSubnetRoutes]   # user data downloads code-server and oauth2-proxy from GitHub
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    DependsOn: [NetworkReady, VolumeAttachPolicy]   # user data downloads from GitHub and attaches /home
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
-      SubnetId: !Ref PrivateSubnet
+      SubnetId: !If [CreateNetwork, !Ref PrivateSubnet, !Ref ExistingSubnetId]
       SecurityGroupIds: [!Ref InstanceSecurityGroup]
       IamInstanceProfile: !Ref InstanceProfile
       MetadataOptions:
@@ -371,37 +572,105 @@ Resources:
         HttpEndpoint: enabled
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
-          Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
-      CreditSpecification: { CPUCredits: standard }
+          Ebs: { VolumeSize: !Ref RootVolumeSize, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      CreditSpecification: !If [IsBurstable, { CPUCredits: standard }, !Ref "AWS::NoValue"]
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ec2" }]
+      # Idempotent: cloud-init runs it on the first boot and a per-boot hook (installed below) runs the current user
+      # data again on every boot, so a template change (versions, settings) applies when the instance restarts.
       UserData:
         Fn::Base64: !Sub
           - |
             #!/bin/bash
             # code2 host: /home on the data volume, code-server as ec2-user behind oauth2-proxy (Cognito).
-            set -euxo pipefail
-            dnf install -y -q git tmux jq gcc make tar xfsprogs python3-pip
+            set -Eeuo pipefail
+            exec > >(tee -a /var/log/code2-setup.log) 2>&1
+            umask 022
+            region=${AWS::Region}
+            auto_updates=${AutoUpdates}
+            idle_hours=${IdleStopHours}
+            log() { echo "code2-setup: $(date -u +%FT%TZ) $*"; }
 
-            # ---- /home on the data volume (attached right after launch; wait for it) ----
+            # First-boot result for CloudFormation (BootWait). Later boots signal too; CloudFormation ignores them.
+            signal() {
+              local body
+              body=$(python3 -c 'import json,sys; print(json.dumps({"Status": sys.argv[1], "Reason": sys.argv[2][-900:], "UniqueId": "code2", "Data": sys.argv[2][-900:]}))' "$1" "$2")
+              curl -fsS --retry 3 -X PUT -H 'Content-Type:' --data-binary "$body" '${BootWaitHandle}' >/dev/null || true
+            }
+            fail() {
+              trap - ERR
+              log "FAILED: $1"
+              signal FAILURE "$1 | $(tail -n 4 /var/log/code2-setup.log | tr '\n' ' ')"
+              exit 1
+            }
+            trap 'fail "line $LINENO exited $?"' ERR
+
+            retry() { local n; for n in 1 2 3 4; do "$@" && return 0; log "retry $n: $1"; sleep $((n * 10)); done; "$@"; }
+            dl() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$2" "$1"; }
+            # put <path> <mode>: writes stdin to path when it differs; succeeds only when the file changed.
+            put() {
+              local tmp; tmp=$(mktemp)
+              cat > "$tmp"
+              if [ -f "$1" ] && cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 1; fi
+              install -D -m "$2" "$tmp" "$1"; rm -f "$tmp"
+            }
+            case $(uname -m) in
+              aarch64) arch=arm64 ;;
+              x86_64) arch=amd64 ;;
+              *) fail "unsupported architecture $(uname -m)" ;;
+            esac
+            work=$(mktemp -d)
+            log "start (code-server ${CodeServerVersion}, oauth2-proxy ${OAuth2ProxyVersion}, $arch)"
+
+            # ---- packages ----
+            pkgs="git tmux jq gcc make tar xfsprogs python3-pip amazon-cloudwatch-agent"
+            if [ "$auto_updates" = true ]; then
+              echo latest | put /etc/dnf/vars/releasever 644 || true   # follow new AL2023 releases, not the AMI's
+              pkgs="$pkgs dnf-automatic"
+            fi
+            # shellcheck disable=SC2086
+            rpm -q $pkgs >/dev/null 2>&1 || retry dnf install -y -q $pkgs
+
+            # ---- /home on the data volume ----
+            vol=${DataVolume}
             dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${VolumeSerial}
-            for _ in $(seq 120); do [ -e "$dev" ] && break; sleep 5; done
-            [ -e "$dev" ]
-            if ! blkid "$dev" >/dev/null; then
+            if [ ! -e "$dev" ]; then
+              token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+              iid=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
+              # A replacement instance waits here until CloudFormation terminates the old one at the end of the update.
+              for _ in $(seq 360); do
+                state=$(aws ec2 describe-volumes --region "$region" --volume-ids "$vol" \
+                  --query 'Volumes[0].State' --output text 2>/dev/null || echo unknown)
+                if [ "$state" = available ]; then
+                  aws ec2 attach-volume --region "$region" --volume-id "$vol" --instance-id "$iid" --device /dev/sdf >/dev/null || true
+                fi
+                [ -e "$dev" ] && break
+                sleep 10
+              done
+              [ -e "$dev" ] || fail "data volume $vol never attached (last state: $state)"
+            fi
+            if ! blkid "$dev" >/dev/null 2>&1; then
+              log "formatting the new /home volume"
               mkfs.xfs -L code2-home "$dev"
               mount "$dev" /mnt && cp -a /home/. /mnt/ && umount /mnt
             fi
             grep -q code2-home /etc/fstab || echo 'LABEL=code2-home /home xfs defaults,nofail 0 2' >> /etc/fstab
-            mount /home
+            systemctl daemon-reload
+            mountpoint -q /home || mount /home
+            xfs_growfs /home >/dev/null   # picks up a larger DataVolumeSize
 
             # ---- code-server ----
             cs=/usr/local/lib/code-server-${CodeServerVersion}
-            if [ ! -d "$cs" ]; then
-              curl -fsSL "https://github.com/coder/code-server/releases/download/v${CodeServerVersion}/code-server-${CodeServerVersion}-linux-arm64.tar.gz" \
-                | tar -xz -C /usr/local/lib
-              mv "/usr/local/lib/code-server-${CodeServerVersion}-linux-arm64" "$cs"
+            if [ ! -x "$cs/bin/code-server" ]; then
+              log "installing code-server ${CodeServerVersion}"
+              dl "https://github.com/coder/code-server/releases/download/v${CodeServerVersion}/code-server-${CodeServerVersion}-linux-$arch.tar.gz" "$work/cs.tar.gz"
+              rm -rf "$cs" "$work/cs" && mkdir -p "$work/cs"
+              tar -xzf "$work/cs.tar.gz" -C "$work/cs" --strip-components 1
+              mv "$work/cs" "$cs"
             fi
+            cs_restart=
+            [ "$(readlink -f /usr/local/bin/code-server)" = "$cs/bin/code-server" ] || cs_restart=1
             ln -sfn "$cs/bin/code-server" /usr/local/bin/code-server
-            cat > /etc/systemd/system/code-server.service <<'UNIT'
+            put /etc/systemd/system/code-server.service 644 <<'UNIT' && cs_restart=1 || true
             [Unit]
             Description=code-server (VS Code) for ec2-user
             After=network-online.target home.mount
@@ -419,54 +688,66 @@ Resources:
             [Install]
             WantedBy=multi-user.target
             UNIT
+            systemctl daemon-reload
+            systemctl enable code-server
+            if [ -n "$cs_restart" ]; then systemctl restart code-server; else systemctl start code-server; fi
 
             # ---- oauth2-proxy (Cognito OIDC) on :80 ----
-            op=oauth2-proxy-v${OAuth2ProxyVersion}.linux-arm64
-            cd /tmp
-            curl -fsSLO "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${OAuth2ProxyVersion}/$op.tar.gz"
-            curl -fsSLO "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${OAuth2ProxyVersion}/$op.tar.gz-sha256sum.txt"
-            sha256sum -c "$op.tar.gz-sha256sum.txt"
-            tar -xzf "$op.tar.gz" && install -m 755 "$op/oauth2-proxy" /usr/local/bin/oauth2-proxy
+            opd=/usr/local/lib/oauth2-proxy-v${OAuth2ProxyVersion}
+            if [ ! -x "$opd/oauth2-proxy" ]; then
+              log "installing oauth2-proxy ${OAuth2ProxyVersion}"
+              op=oauth2-proxy-v${OAuth2ProxyVersion}.linux-$arch
+              base=https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${OAuth2ProxyVersion}
+              dl "$base/$op.tar.gz" "$work/$op.tar.gz"
+              dl "$base/$op.tar.gz-sha256sum.txt" "$work/$op.tar.gz-sha256sum.txt"
+              (cd "$work" && sha256sum -c "$op.tar.gz-sha256sum.txt" && tar -xzf "$op.tar.gz")
+              install -D -m 755 "$work/$op/oauth2-proxy" "$opd/oauth2-proxy"
+            fi
+            op_restart=
+            [ "$(readlink -f /usr/local/bin/oauth2-proxy)" = "$opd/oauth2-proxy" ] || op_restart=1
+            ln -sfn "$opd/oauth2-proxy" /usr/local/bin/oauth2-proxy
             id oauth2-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin oauth2-proxy
             install -d -m 750 -g oauth2-proxy /etc/oauth2-proxy
 
-            # The client id and URL are published once CloudFront is up (a few minutes after this instance starts).
-            systemctl daemon-reload
-            systemctl enable --now code-server
+            # The client id and URL are published once CloudFront is up (a few minutes after the first boot starts).
+            conf=
             for _ in $(seq 180); do
-              conf=$(aws ssm get-parameter --region ${AWS::Region} --name /${AWS::StackName}/oauth2-proxy \
+              conf=$(aws ssm get-parameter --region "$region" --name /${AWS::StackName}/oauth2-proxy \
                 --query Parameter.Value --output text 2>/dev/null) && break
               sleep 10
             done
-            [ -n "$conf" ] || { echo "oauth2-proxy settings never appeared in SSM" >&2; exit 1; }
+            [ -n "$conf" ] || fail "oauth2-proxy settings never appeared in SSM /${AWS::StackName}/oauth2-proxy"
             client_id=$(jq -r .clientId <<<"$conf")
             url=$(jq -r .url <<<"$conf")
-            cat > /etc/oauth2-proxy/oauth2-proxy.cfg <<CFG
+            put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
             http_address = "0.0.0.0:80"
             upstreams = ["http://127.0.0.1:8080/"]
             provider = "oidc"
             provider_display_name = "Cognito"
-            oidc_issuer_url = "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+            oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${UserPool}"
             client_id = "$client_id"
             redirect_url = "$url/oauth2/callback"
             scope = "openid email profile"
             code_challenge_method = "S256"
             email_domains = ["*"]
+            whitelist_domains = ["${CognitoHost}"]
             skip_provider_button = true
             cookie_name = "_code2"
             cookie_secure = true
             cookie_samesite = "lax"
-            cookie_expire = "12h"
+            cookie_expire = "${SessionHours}h"
             cookie_refresh = "30m"
             silence_ping_logging = true
             CFG
-            secret=$(aws cognito-idp describe-user-pool-client --region ${AWS::Region} --user-pool-id ${UserPool} \
+            # Secrets stay out of the log: the client secret is read here, the cookie key is made once and kept so
+            # sessions survive reboots.
+            secret=$(aws cognito-idp describe-user-pool-client --region "$region" --user-pool-id ${UserPool} \
               --client-id "$client_id" --query UserPoolClient.ClientSecret --output text)
-            cookie=$(python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
-            umask 077
-            printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret" "$cookie" > /etc/oauth2-proxy/secrets.env
-            umask 022
-            cat > /etc/systemd/system/oauth2-proxy.service <<'UNIT'
+            cookie=$(sed -n 's/^OAUTH2_PROXY_COOKIE_SECRET=//p' /etc/oauth2-proxy/secrets.env 2>/dev/null || true)
+            [ -n "$cookie" ] || cookie=$(python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+            printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret" "$cookie" \
+              | put /etc/oauth2-proxy/secrets.env 600 && op_restart=1 || true
+            put /etc/systemd/system/oauth2-proxy.service 644 <<'UNIT' && op_restart=1 || true
             [Unit]
             Description=oauth2-proxy (Cognito sign-in in front of code-server)
             After=network-online.target
@@ -490,20 +771,234 @@ Resources:
             WantedBy=multi-user.target
             UNIT
             systemctl daemon-reload
-            systemctl enable --now oauth2-proxy
-          - VolumeSerial: !Join ["", !Split ["-", !Ref DataVolume]]   # nvme serial = volume id without the dash
+            systemctl enable oauth2-proxy
+            if [ -n "$op_restart" ]; then systemctl restart oauth2-proxy; else systemctl start oauth2-proxy; fi
 
-  DataVolumeAttachment:
-    Type: AWS::EC2::VolumeAttachment
+            # ---- CloudWatch agent: this log, disk and memory use ----
+            put /opt/aws/amazon-cloudwatch-agent/etc/code2.json 644 <<'JSON' && cw_restart=1 || cw_restart=
+            {
+              "agent": { "metrics_collection_interval": 300 },
+              "metrics": {
+                "append_dimensions": { "InstanceId": "${!aws:InstanceId}" },
+                "metrics_collected": {
+                  "disk": { "measurement": ["used_percent"], "resources": ["/", "/home"], "drop_device": true },
+                  "mem": { "measurement": ["used_percent"] }
+                }
+              },
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      { "file_path": "/var/log/code2-setup.log", "log_group_name": "${LogGroup}", "log_stream_name": "{instance_id}/setup" },
+                      { "file_path": "/var/log/code2-idle.log", "log_group_name": "${LogGroup}", "log_stream_name": "{instance_id}/idle" }
+                    ]
+                  }
+                }
+              }
+            }
+            JSON
+            if [ -n "$cw_restart" ] || ! systemctl is-active -q amazon-cloudwatch-agent; then
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/code2.json >/dev/null
+            fi
+
+            # ---- security updates ----
+            if [ "$auto_updates" = true ]; then
+              sed -i -e 's/^upgrade_type *=.*/upgrade_type = security/' -e 's/^apply_updates *=.*/apply_updates = yes/' /etc/dnf/automatic.conf
+              systemctl enable --now dnf-automatic.timer
+            elif systemctl list-unit-files dnf-automatic.timer >/dev/null 2>&1; then
+              systemctl disable --now dnf-automatic.timer || true
+            fi
+
+            # ---- idle stop ----
+            put /usr/local/sbin/code2-idle 755 <<'IDLE' || true
+            #!/bin/bash
+            # code2-idle <hours>: powers off (stops) the instance after <hours> with no viewer, SSH session or load.
+            stamp=/run/code2-active
+            if [ ! -f $stamp ] || ss -Htn state established '( sport = :80 or sport = :22 )' | grep -q . \
+               || pgrep -u ssm-user >/dev/null || awk '{ exit !($1 > 0.5) }' /proc/loadavg; then
+              touch $stamp
+            fi
+            idle=$(( $(date +%s) - $(stat -c %Y $stamp) ))
+            if [ "$idle" -ge $(( $1 * 3600 )) ]; then
+              echo "$(date -u +%FT%TZ) idle for $idle s, stopping" >> /var/log/code2-idle.log
+              systemctl poweroff
+            fi
+            IDLE
+            if [ "$idle_hours" -gt 0 ]; then
+              put /etc/systemd/system/code2-idle.service 644 <<'UNIT' || true
+            [Unit]
+            Description=code2 idle stop check
+            [Service]
+            Type=oneshot
+            EnvironmentFile=/etc/code2-idle.env
+            ExecStart=/usr/local/sbin/code2-idle $HOURS
+            UNIT
+              put /etc/systemd/system/code2-idle.timer 644 <<'UNIT' || true
+            [Unit]
+            Description=code2 idle stop check every 5 minutes
+            [Timer]
+            OnBootSec=5min
+            OnUnitActiveSec=5min
+            [Install]
+            WantedBy=timers.target
+            UNIT
+              echo "HOURS=$idle_hours" | put /etc/code2-idle.env 644 || true
+              systemctl daemon-reload
+              systemctl enable --now code2-idle.timer
+            elif [ -f /etc/systemd/system/code2-idle.timer ]; then
+              systemctl disable --now code2-idle.timer || true
+            fi
+
+            # ---- run this user data again on every boot ----
+            put /var/lib/cloud/scripts/per-boot/code2-setup 755 <<'HOOK' || true
+            #!/bin/bash
+            # Runs the instance's current user data (code2 setup) again, so template updates apply on restart.
+            t=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+            curl -fsS -H "X-aws-ec2-metadata-token: $t" http://169.254.169.254/latest/user-data > /run/code2-userdata
+            exec bash /run/code2-userdata
+            HOOK
+
+            rm -rf "$work"
+            log "done"
+            signal SUCCESS "code-server ${CodeServerVersion}, oauth2-proxy ${OAuth2ProxyVersion} running"
+          - VolumeSerial: !Join ["", !Split ["-", !Ref DataVolume]]   # nvme serial = volume id without the dash
+            CognitoHost: !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+
+  # Create waits for the first boot: a setup that fails (downloads, volume, Cognito) rolls the stack back with the
+  # failing line in the event reason, instead of finishing green and serving 502.
+  BootWait:
+    Type: AWS::CloudFormation::WaitCondition
+    Condition: WaitsForBoot
+    DependsOn: OAuth2ProxyConfig
     Properties:
-      InstanceId: !Ref Instance
-      VolumeId: !Ref DataVolume
-      Device: /dev/sdf
+      Handle: !Ref BootWaitHandle
+      Timeout: "1800"
+      Count: 1
+
+  # ---------- backups ----------
+  BackupRole:
+    Type: AWS::IAM::Role
+    Condition: HasBackup
+    Properties:
+      Description: code2 Data Lifecycle Manager - daily /home snapshots
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+
+  BackupPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Condition: HasBackup
+    Properties:
+      Description: !Sub "${AWS::StackName} home volume daily snapshots"
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt BackupRole.Arn
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes: [VOLUME]
+        TargetTags: [{ Key: code2-backup, Value: !Ref "AWS::StackName" }]
+        Schedules:
+          - Name: daily
+            CreateRule: { Interval: 24, IntervalUnit: HOURS, Times: ["18:00"] }   # UTC, 03:00 KST
+            RetainRule: { Count: !Ref BackupRetainCount }
+            CopyTags: true
+
+  # ---------- alarms (with AlarmEmail) ----------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alarms"
+      Subscription: [{ Protocol: email, Endpoint: !Ref AlarmEmail }]
+
+  InstanceStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: EC2 status check failing"
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  HomeDiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: /home more than 85% full"
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref Instance }
+        - { Name: path, Value: /home }
+        - { Name: fstype, Value: xfs }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  RootDiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: root volume more than 85% full"
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref Instance }
+        - { Name: path, Value: / }
+        - { Name: fstype, Value: xfs }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  SetupFailureFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: HasAlarmEmail
+    Properties:
+      LogGroupName: !Ref LogGroup
+      FilterPattern: '"code2-setup" "FAILED"'
+      MetricTransformations:
+        - { MetricNamespace: code2, MetricName: !Sub "${AWS::StackName}-setup-failures", MetricValue: "1" }
+
+  SetupFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: !Sub "${AWS::StackName}: boot-time setup failed (deploy.sh logs)"
+      Namespace: code2
+      MetricName: !Sub "${AWS::StackName}-setup-failures"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
 
   # ---------- edge ----------
   InstanceVpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
-    DependsOn: GatewayAttachment
+    DependsOn: NetworkReady
     Properties:
       VpcOriginEndpointConfig:
         Name: !Sub "${AWS::StackName}-vpco-ec2"
@@ -521,7 +1016,7 @@ Resources:
         Aliases: !If [HasDomain, [!Ref DomainName], !Ref "AWS::NoValue"]
         HttpVersion: http2and3
         IPV6Enabled: true
-        PriceClass: PriceClass_200
+        PriceClass: !Ref PriceClass
         ViewerCertificate: !If
           - HasDomain
           - { AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021 }
@@ -535,12 +1030,11 @@ Resources:
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
           # Everything dynamic: no caching, every viewer header and cookie forwarded (Host for code-server's
-          # WebSocket origin check, oauth2-proxy session cookies).
+          # WebSocket origin check, oauth2-proxy session cookies). CloudFront does not compress uncached responses.
           TargetOriginId: code2-ec2
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
           CachedMethods: [GET, HEAD]
-          Compress: true
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad        # Managed-CachingDisabled
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
 
@@ -567,17 +1061,27 @@ Outputs:
     Value: !Sub
       - "https://${Host}"
       - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+  # Ends the oauth2-proxy session, then the Cognito one, and comes back to the site's sign-in.
+  LogoutUrl:
+    Value: !Sub
+      - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
+      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
   InstanceId:
     Value: !Ref Instance
   InstancePrivateIp:
     Value: !GetAtt Instance.PrivateIp
+  AvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
   InstanceConnectEndpointId:
-    Value: !Ref InstanceConnectEndpoint
+    Value: !If [CreateEice, !Ref InstanceConnectEndpoint, !Ref ExistingEiceId]
   UserPoolId:
     Value: !Ref UserPool
   DistributionId:
     Value: !Ref Distribution
   NatPublicIp:
+    Condition: CreateNetwork
     Value: !Ref NatEip
   DataVolumeId:
     Value: !Ref DataVolume
+  LogGroupName:
+    Value: !Ref LogGroup
