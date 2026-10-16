@@ -1,15 +1,15 @@
 <h1 align="center">code2</h1>
 
 <p align="center"><b>내 AWS 계정에 만드는 브라우저용 개인 VS Code 개발 서버</b><br>
-CloudFront → private EC2(Graviton) → code-server, Cognito 로그인(MFA)</p>
+CloudFront → private EC2(Graviton) → code-server, Cognito 로그인(기본 MFA)</p>
 
 ---
 
 ## 한눈에 보기
 
 - CloudFormation 스택 하나로 **전용 VPC, private EC2, CloudFront, Cognito 로그인**이 모두 만들어집니다. 미리 준비할 네트워크나 리소스는 없습니다. 이미 있는 VPC에 넣을 수도 있습니다.
-- 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP)합니다. 로그인하면 바로 VS Code가 열립니다.
-- 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
+- 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP, `CODE2_MFA=off`면 암호만)합니다. 로그인하면 바로 VS Code가 열립니다.
+- 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 Nitro 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
 - 작업 공간(`/home`)은 별도 EBS 볼륨에 있어서 인스턴스를 바꿔도 남습니다. 매일 스냅샷으로 백업합니다.
 - 도메인은 없어도 됩니다. 기본으로 CloudFront 주소(`https://dxxxx.cloudfront.net`)를 쓰고, Route 53 도메인이 있으면 `code.example.com` 같은 주소로 붙일 수 있습니다.
 
@@ -24,6 +24,7 @@ export AWS_REGION=ap-northeast-2              # 원하는 리전
 export CODE2_ADMIN_EMAIL=you@example.com      # 임시 암호를 받을 메일
 # export CODE2_ADMIN_USER=alice               # 로그인 이름 (기본 admin)
 # export CODE2_DOMAIN=code.example.com        # 선택: 내 도메인 (아래 "내 도메인 쓰기")
+# export CODE2_MFA=off                        # 선택: TOTP 없이 암호만 (기본 on)
 # export CODE2_ALARM_EMAIL=you@example.com    # 선택: 장애 알림 메일 (아래 "모니터링")
 
 infra/deploy.sh stack plan     # 사전 점검 후 변경 세트만 만들고 내용을 보여 줍니다
@@ -33,11 +34,11 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
 2. `status`에 나온 URL에 접속해 임시 암호로 로그인합니다.
-3. 새 암호(12자 이상)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다.
+3. 새 암호(12자 이상)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
 
 `stack apply`는 인스턴스가 code-server와 oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
 
-`plan`은 변경 세트를 만들기 전에 스택 이름 규칙, 인스턴스 타입을 제공하는 AZ, VPC·EIP·EICE 할당량을 확인합니다.
+`plan`은 변경 세트를 만들기 전에 스택 이름 규칙, Nitro 인스턴스 타입인지, 그 타입을 제공하는 AZ, VPC·EIP·EICE 할당량을 확인합니다.
 
 ### 내 도메인 쓰기 (선택)
 
@@ -57,7 +58,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 ```
 
 - 스크립트가 서브넷의 AZ, VPC CIDR, 인터넷 게이트웨이, NAT 경로를 확인합니다.
-- 그 VPC에 EC2 Instance Connect Endpoint가 이미 있으면 그것을 씁니다(VPC당 하나). 그 엔드포인트의 보안 그룹은 인스턴스의 22번으로 나갈 수 있어야 합니다.
+- 그 VPC에 EC2 Instance Connect Endpoint가 이미 있으면 그것을 씁니다(VPC당 하나). 스택이 그 엔드포인트의 보안 그룹에 인스턴스로 나가는 22번 egress 규칙을 추가합니다(스택을 지우면 규칙도 지워집니다).
 - 인스턴스의 `:80`은 CloudFront origin-facing 관리형 prefix list에서만 열리므로, 같은 VPC의 다른 워크로드는 닿을 수 없습니다.
 - NAT Gateway와 공인 IPv4 요금(월 약 $46)이 들지 않습니다.
 
@@ -75,7 +76,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 1. 브라우저가 code2 URL로 접속합니다. CloudFront가 TLS를 끝내고, 캐시 없이 모든 헤더와 쿠키를 그대로 실어 VPC origin으로 인스턴스의 `:80`에 전달합니다.
 2. **oauth2-proxy**가 세션 쿠키(`_code2`)를 확인합니다. 쿠키가 없으면 Cognito 관리형 로그인 페이지로 보냅니다. Authorization code + PKCE(S256) 방식입니다.
-3. 사용자가 암호와 TOTP로 로그인하면 Cognito가 `/oauth2/callback`으로 되돌려 보냅니다. oauth2-proxy는 코드를 토큰으로 바꾸고 ID 토큰을 검증한 뒤 세션 쿠키를 발급합니다.
+3. 사용자가 암호와 TOTP(`Mfa=on`일 때)로 로그인하면 Cognito가 `/oauth2/callback`으로 되돌려 보냅니다. oauth2-proxy는 코드를 토큰으로 바꾸고 ID 토큰을 검증한 뒤 세션 쿠키를 발급합니다.
 4. 이후 요청은 oauth2-proxy가 `127.0.0.1:8080`의 **code-server**로 프록시합니다. 에디터와 터미널이 쓰는 WebSocket도 같은 경로로 지나갑니다. code-server는 `--auth none`이라 따로 로그인을 묻지 않고, 루프백에만 열려 있어서 oauth2-proxy를 거치지 않고는 닿을 수 없습니다.
 5. 세션은 최대 `SessionHours`(기본 12시간) 유지됩니다. oauth2-proxy가 30분마다 refresh 토큰으로 갱신하고, refresh 토큰이 만료되면 다시 로그인해야 합니다.
 6. 로그아웃은 `status`에 나오는 **logout** 주소로 합니다. oauth2-proxy 세션과 Cognito 세션을 모두 끝내고 로그인 화면으로 돌아옵니다.
@@ -101,7 +102,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 영역 | 설정 |
 |---|---|
 | 인바운드 | 인스턴스 보안 그룹: `:80`은 CloudFront origin-facing 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)에서만, `:22`는 EICE 보안 그룹에서만 허용합니다. VPC origin 요청은 ENI의 VPC 주소가 아니라 이 대역에서 들어옵니다. 공인 IP는 없습니다 |
-| 로그인 | User Pool은 관리자만 계정을 만들 수 있고, **TOTP MFA가 필수**입니다. 암호는 최소 12자이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
+| 로그인 | User Pool은 관리자만 계정을 만들 수 있고, 기본으로 **TOTP MFA가 필수**입니다(`CODE2_MFA=off`로 끌 수 있지만, sudo 셸이 걸린 로그인이라 권하지 않습니다). 암호는 최소 12자이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
 | 비밀값 | Cognito 클라이언트 시크릿은 부팅할 때 인스턴스 역할(`cognito-idp:DescribeUserPoolClient`, 이 User Pool로 한정)로 직접 읽습니다. 쿠키 서명 키는 인스턴스에서 한 번 생성해 재부팅해도 유지합니다. 둘 다 `/etc/oauth2-proxy/secrets.env`(600)에만 있고, 템플릿·파라미터·저장소·로그에는 없습니다 |
 | 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
 | 인스턴스 | IMDSv2 필수(hop limit 1), EBS 암호화, oauth2-proxy는 전용 시스템 사용자로 실행하고 `:80` 바인딩 권한만 가집니다(`ProtectSystem=strict`) |
@@ -116,7 +117,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 | 항목 | 값 |
 |---|---|
-| 인스턴스 | 기본 `t4g.medium` (Graviton2, 2 vCPU, 4 GiB, 버스터블 standard: 평소 vCPU당 20%, 크레딧이 남아 있으면 100%). 4 GiB Graviton 중 가장 저렴합니다. 메모리가 모자라면 `t4g.large`(8 GiB), 그 밖에 `m7g`, `m8g`, `t3`, `m7i` 등도 됩니다 |
+| 인스턴스 | 기본 `t4g.medium` (Graviton2, 2 vCPU, 4 GiB, 버스터블 standard: 평소 vCPU당 20%, 크레딧이 남아 있으면 100%). 4 GiB Graviton 중 가장 저렴합니다. 메모리가 모자라면 `t4g.large`(8 GiB), 그 밖에 `m7g`, `m8g`, `t3`, `m7i` 등 Nitro 타입이면 됩니다(`/home`을 NVMe ID로 찾으므로 `t2`, `m4` 같은 Xen 타입은 `plan`이 거부합니다) |
 | OS | Amazon Linux 2023 (arm64 또는 x86_64, 인스턴스 타입에 맞춤) |
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
@@ -177,6 +178,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_ROOT_SIZE` | `30` | 언제든 | `/` GiB. 바꾸면 인스턴스 교체 |
 | `CODE2_CODE_SERVER_VERSION` / `CODE2_OAUTH2_PROXY_VERSION` | `4.139.1` / `7.15.5` | 언제든 | 바꾸면 인스턴스가 중지 후 시작되며 새 버전을 설치합니다 |
 | `CODE2_SESSION_HOURS` | `12` | 언제든 | 로그인 유지 시간(1–168) |
+| `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
 | `CODE2_IDLE_STOP_HOURS` | `0` (끔) | 언제든 | 유휴 상태가 이 시간만큼 이어지면 인스턴스 중지(아래 "유휴 중지") |
 | `CODE2_BACKUP_COUNT` | `7` | 언제든 | 보관할 일일 `/home` 스냅샷 수. `0`이면 백업 끔 |
