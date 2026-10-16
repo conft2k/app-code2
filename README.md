@@ -48,37 +48,72 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 ### 전체 구성
 
+```mermaid
+flowchart TB
+  user(["🧑‍💻 브라우저"])
+  laptop(["💻 노트북<br/>ssh · VS Code Remote-SSH"])
+
+  subgraph aws["☁️ AWS 계정 · 리전"]
+    cf["CloudFront<br/>HTTPS · 캐시 없음<br/>*.cloudfront.net 또는 내 도메인"]
+    cognito["Cognito User Pool<br/>암호 + TOTP MFA"]
+    ssm["SSM Parameter Store<br/>client id · URL"]
+
+    subgraph vpc["VPC 10.42.0.0/16 · AZ 1개"]
+      subgraph pri["🔒 private subnet 10.42.1.0/24"]
+        eice["EC2 Instance<br/>Connect Endpoint"]
+        subgraph ec2["EC2 · Graviton t4g.large · AL2023 arm64"]
+          proxy["oauth2-proxy<br/>:80"]
+          code["code-server<br/>127.0.0.1:8080<br/>ec2-user · sudo"]
+          home[("/home<br/>EBS 50 GiB")]
+        end
+      end
+      subgraph pub["public subnet 10.42.0.0/24"]
+        nat["NAT Gateway"]
+      end
+      s3ep["S3 gateway endpoint<br/>dnf 저장소"]
+      igw["Internet Gateway"]
+    end
+  end
+
+  internet(["🌐 인터넷<br/>GitHub · npm · PyPI · Open VSX"])
+
+  user -->|"① HTTPS"| cf
+  cf -->|"② VPC origin · http :80"| proxy
+  proxy -->|"③ 프록시 · WebSocket"| code
+  code --- home
+  user -.->|"로그인 · TOTP"| cognito
+  proxy -.->|"OIDC 토큰 검증"| cognito
+  laptop -->|"open-tunnel · IAM 인증"| eice
+  eice -->|"SSH tcp 22"| code
+  code -->|"아웃바운드"| nat
+  nat --> igw --> internet
+  code -.-> s3ep
+  proxy -.->|"부팅 시 설정 읽기"| ssm
+
+  classDef client fill:#F3F4F6,stroke:#6B7280,color:#111827
+  classDef edge fill:#EDE4FF,stroke:#8C4FFF,color:#2E1065
+  classDef security fill:#FDE2E6,stroke:#DD344C,color:#5C0B16
+  classDef compute fill:#FFE9D6,stroke:#ED7100,color:#4A2300
+  classDef network fill:#E9F3DA,stroke:#7AA116,color:#2F4207
+  classDef storage fill:#DFF3E4,stroke:#3F8624,color:#173A10
+  classDef mgmt fill:#FCE4F0,stroke:#E7157B,color:#5B0830
+
+  class user,laptop,internet client
+  class cf edge
+  class cognito security
+  class proxy,code compute
+  class eice,nat,igw,s3ep network
+  class home storage
+  class ssm mgmt
+
+  style aws fill:none,stroke:#232F3E,stroke-width:2px
+  style vpc fill:none,stroke:#8C4FFF,stroke-width:2px
+  style pri fill:none,stroke:#00A4A6,stroke-width:1.5px,stroke-dasharray:6 4
+  style pub fill:none,stroke:#7AA116,stroke-width:1.5px,stroke-dasharray:6 4
+  style ec2 fill:none,stroke:#ED7100,stroke-width:1.5px
 ```
-                  Browser                              Laptop (ssh / Remote-SSH)
-                     |                                         |
-                     | HTTPS                                   | aws ec2-instance-connect open-tunnel (IAM)
-                     v                                         |
-       CloudFront  (*.cloudfront.net or your domain,           |
-                    no cache)                                  |
-                     |                                         |
-                     | VPC origin, http :80                    |
-  +------------------|-----------------------------------------|---------------+
-  | code2 VPC 10.42.0.0/16, one AZ                             |               |
-  |                  v                                         v               |
-  |   private subnet 10.42.1.0/24                     EC2 Instance Connect     |
-  |   +-------------------------------------------+   Endpoint  --- tcp 22 --+ |
-  |   | EC2  t4g.large, AL2023 arm64               | <------------------------+ |
-  |   |                                            |                           |
-  |   |   oauth2-proxy  0.0.0.0:80  -- OIDC -->  Cognito user pool             |
-  |   |        |                                   |                           |
-  |   |        v                                   |                           |
-  |   |   code-server  127.0.0.1:8080              |                           |
-  |   |   (auth none, runs as ec2-user)            |                           |
-  |   |                                            |                           |
-  |   |   /      root EBS 30 GiB (OS, packages)    |                           |
-  |   |   /home  data EBS 50 GiB (workspace)       |                           |
-  |   +-------------------------------------------+                            |
-  |                  |  outbound (git, npm, pip, extensions)                   |
-  |                  v                                                         |
-  |   public subnet 10.42.0.0/24 : NAT gateway --> internet gateway            |
-  |   S3 gateway endpoint (dnf repos)                                          |
-  +----------------------------------------------------------------------------+
-```
+
+실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다.
 
 ### 브라우저 접속 흐름
 
