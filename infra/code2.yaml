@@ -1,9 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private EC2
-  (oauth2-proxy :80 signs in with Cognito + TOTP -> code-server 127.0.0.1:8080). Self-contained by default: its own
-  VPC, NAT gateway for egress and an EC2 Instance Connect Endpoint for SSH; an existing VPC can be used instead.
-  A custom domain is optional; without one the site is served on the distribution's *.cloudfront.net name.
+  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private EC2 (oauth2-proxy :80 with
+  Cognito sign-in -> code-server 127.0.0.1:8080). Own VPC, NAT and EC2 Instance Connect Endpoint, or an existing VPC.
   Deployed with infra/deploy.sh.
 
 Metadata:
@@ -27,8 +25,7 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      AZ of the instance and its /home volume. Empty picks the region's first AZ (deploy.sh picks one that offers
-      InstanceType). Required with ExistingSubnetId (the subnet's AZ).
+      AZ of the instance and /home (deploy.sh picks one offering InstanceType); required with ExistingSubnetId
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -37,8 +34,7 @@ Parameters:
     Type: String
     AllowedPattern: "^pl-[0-9a-f]+$"
     Description: >-
-      The region's com.amazonaws.global.cloudfront.origin-facing managed prefix list (deploy.sh looks it up). VPC origin
-      traffic reaches the instance from these addresses, so port 80 is open to them only.
+      com.amazonaws.global.cloudfront.origin-facing prefix list (deploy.sh looks it up); :80 is open to it only
   PublicSubnetCidr:
     Type: String
     Default: 10.42.0.0/24
@@ -52,8 +48,7 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^vpc-[0-9a-f]+$"
     Description: >-
-      Optional existing VPC instead of a new one. It needs an internet gateway attached (CloudFront VPC origins
-      require one) and ExistingSubnetId must be a private subnet with internet egress (NAT).
+      Optional existing VPC (with an internet gateway); ExistingSubnetId must be private with NAT egress
   ExistingSubnetId:
     Type: String
     Default: ""
@@ -89,8 +84,8 @@ Parameters:
   ImageId:
     Type: AWS::EC2::Image::Id
     Description: >-
-      Amazon Linux 2023 AMI matching InstanceType's architecture (arm64 or x86_64). deploy.sh resolves the latest
-      one on create and keeps it on update unless asked to move on (a new AMI replaces the instance; /home stays).
+      AL2023 AMI for InstanceType's architecture; deploy.sh keeps it on update unless asked (a new one replaces
+      the instance)
   InstanceType:
     Type: String
     Default: t4g.medium
@@ -133,8 +128,7 @@ Parameters:
     MinValue: 0
     MaxValue: 72
     Description: >-
-      Stop the instance after this many hours with no browser connection, SSH session or load (0 = never). An open
-      code2 tab counts as activity. Restart it with deploy.sh start.
+      Stop after this many hours with no browser tab, SSH session or load (0 = never); deploy.sh start restarts
   SessionHours:
     Type: Number
     Default: 12
@@ -145,9 +139,8 @@ Parameters:
     Type: String
     Default: "on"
     AllowedValues: ["on", "off"]
-    Description: >-
-      on: every user sets up TOTP on first sign-in and enters a code each time. off: password only. Cognito's
-      OPTIONAL mode is left out because managed login never offers TOTP setup in it.
+    # No OPTIONAL: managed login never offers TOTP setup in it.
+    Description: "on: TOTP set up on first sign-in and asked every time; off: password only"
   BackupRetainCount:
     Type: Number
     Default: 7
@@ -164,16 +157,14 @@ Parameters:
     Default: a
     AllowedValues: [a, b]
     Description: >-
-      Which of two VPC origins the distribution uses. A VPC origin in use cannot move to another instance, so an
-      update that replaces the instance flips the slot (deploy.sh does it): a new origin for the new instance, then
-      the old one is deleted once the distribution has moved over.
+      VPC origin in use. One cannot move to another instance, so deploy.sh flips the slot when the instance is
+      replaced.
   WaitForBoot:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: >-
-      Create waits until the instance reports a working setup and rolls back otherwise. deploy.sh sets false for
-      stacks that predate this signal.
+      Create waits for a working setup and rolls back otherwise (false for stacks that predate it)
   AdminUsername:
     Type: String
     Default: admin
@@ -218,14 +209,13 @@ Conditions:
   WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
   OriginSlotA: !Equals [!Ref OriginSlot, a]
   OriginSlotB: !Equals [!Ref OriginSlot, b]
-  # T families (t2, t3, t3a, t4g) are the burstable ones: "t4g" split on "t" starts with an empty string. Trainium
-  # (trn1, trn2) starts with "t" too but takes no CPU credit setting.
+  # T families are burstable ("t4g" split on "t" starts with ""); Trainium (trn*) is not.
   IsBurstable: !And
     - !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
     - !Not [!Equals [!Select [0, !Split [tr, !Select [0, !Split [".", !Ref InstanceType]]]], ""]]
 
 Resources:
-  # ---------- network (skipped with ExistingVpcId) ----------
+  # --- network (skipped with ExistingVpcId) ---
   Vpc:
     Type: AWS::EC2::VPC
     Condition: CreateNetwork
@@ -235,7 +225,7 @@ Resources:
       EnableDnsHostnames: true
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
 
-  # CloudFront VPC origins require an internet gateway on the VPC; only the NAT gateway uses it.
+  # CloudFront VPC origins need an internet gateway on the VPC.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Condition: CreateNetwork
@@ -323,7 +313,7 @@ Resources:
     Condition: CreateNetwork
     Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRouteTable }
 
-  # Keeps dnf repos and other S3 traffic off the NAT gateway.
+  # dnf repos and other S3 traffic skip the NAT gateway.
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
     Condition: CreateNetwork
@@ -333,8 +323,7 @@ Resources:
       ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
       RouteTableIds: [!Ref PrivateRouteTable]
 
-  # DependsOn cannot name a resource whose condition is false; this handle stands in for the network being ready
-  # (egress for the instance's downloads, the internet gateway for the VPC origin) in both network modes.
+  # Stands in for "network ready" in both modes (DependsOn cannot name a resource whose condition is false).
   NetworkReady:
     Type: AWS::CloudFormation::WaitConditionHandle
     Metadata:
@@ -342,9 +331,8 @@ Resources:
       Association: !If [CreateNetwork, !Ref PrivateSubnetRoutes, ""]
       Gateway: !If [CreateNetwork, !Ref GatewayAttachment, ""]
 
-  # ---------- security groups ----------
-  # CloudFront's VPC origin ENIs deliver requests from the origin-facing CloudFront addresses, not from their VPC IPs,
-  # so :80 allows that managed prefix list (a VPC CIDR rule drops the traffic and CloudFront answers 504).
+  # --- security groups ---
+  # VPC origin traffic comes from CloudFront's origin-facing prefix list, not VPC IPs (a CIDR rule gives 504).
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -380,7 +368,7 @@ Resources:
       SourceSecurityGroupId: !If [CreateEice, !Ref EiceSecurityGroup, !Ref ExistingEiceSecurityGroupId]
       Description: EC2 Instance Connect Endpoint
 
-  # An existing EICE's security group may allow egress to listed groups only; this adds the instance to them.
+  # An existing EICE's group may allow egress to listed groups only.
   EiceSshToInstance:
     Type: AWS::EC2::SecurityGroupEgress
     Metadata:
@@ -405,7 +393,7 @@ Resources:
       PreserveClientIp: false
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eice" }]
 
-  # ---------- sign-in ----------
+  # --- sign-in ---
   UserPool:
     Type: AWS::Cognito::UserPool
     DeletionPolicy: Retain
@@ -417,14 +405,14 @@ Resources:
       AliasAttributes: [email]
       AutoVerifiedAttributes: [email]
       UsernameConfiguration: { CaseSensitive: false }
-      # A shell with sudo sits behind this login: TOTP is on unless Mfa=off, set up on first sign-in.
+      # A sudo shell sits behind this login.
       MfaConfiguration: !If [MfaOn, "ON", "OFF"]
       EnabledMfas: !If [MfaOn, [SOFTWARE_TOKEN_MFA], !Ref "AWS::NoValue"]
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
           EmailSubject: "[code2] VS Code 계정이 만들어졌습니다"
-          # Without a custom domain the URL is only known after the distribution exists: deploy.sh status shows it.
+          # Without a custom domain the URL is known only after the distribution exists.
           EmailMessage: !Sub
             - >-
               code2 (VS Code) 계정입니다.<br><br>
@@ -498,8 +486,7 @@ Resources:
         - { Name: email, Value: !Ref AdminEmail }
         - { Name: email_verified, Value: "true" }
 
-  # The instance cannot reference the client or the distribution directly (the distribution points at the
-  # instance), so their values reach it through this parameter, which it polls at boot.
+  # Client id and URL reach the instance here (the distribution points at the instance).
   OAuth2ProxyConfig:
     Type: AWS::SSM::Parameter
     Properties:
@@ -510,7 +497,7 @@ Resources:
         - '{"clientId":"${UserPoolClient}","url":"https://${Host}"}'
         - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
 
-  # ---------- compute ----------
+  # --- compute ---
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -543,9 +530,8 @@ Resources:
     Properties:
       Roles: [!Ref InstanceRole]
 
-  # The instance attaches /home itself at boot (no AWS::EC2::VolumeAttachment): a replacement instance waits until
-  # CloudFormation terminates the old one, then takes the volume over. Separate from the role so it can name the
-  # instance profile, which limits the attach to instances started with it.
+  # The instance attaches /home itself at boot, so a replacement takes it over once the old one terminates.
+  # Separate from the role so the attach is limited to this instance profile.
   VolumeAttachPolicy:
     Type: AWS::IAM::RolePolicy
     Properties:
@@ -569,7 +555,7 @@ Resources:
             Condition:
               StringEquals: { "ec2:InstanceProfile": !GetAtt InstanceProfile.Arn }
 
-  # /home lives here so a replaced instance keeps the workspace. Deleting the stack leaves a snapshot.
+  # /home, kept across instance replacement; stack deletion leaves a snapshot.
   DataVolume:
     Type: AWS::EC2::Volume
     DeletionPolicy: Snapshot
@@ -590,7 +576,7 @@ Resources:
       LogGroupName: !Sub "/code2/${AWS::StackName}"
       RetentionInDays: 30
 
-  # Ref is a presigned URL the instance PUTs its first-boot result to (see BootWait).
+  # Presigned URL for the first-boot result (BootWait).
   BootWaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
 
@@ -614,13 +600,12 @@ Resources:
           Ebs: { VolumeSize: !Ref RootVolumeSize, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
       CreditSpecification: !If [IsBurstable, { CPUCredits: standard }, !Ref "AWS::NoValue"]
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ec2" }]
-      # Idempotent: cloud-init runs it on the first boot and a per-boot hook (installed below) runs the current user
-      # data again on every boot, so a template change (versions, settings) applies when the instance restarts.
+      # Idempotent; a per-boot hook reruns the current user data, so template changes apply on restart.
       UserData:
         Fn::Base64: !Sub
           - |
             #!/bin/bash
-            # code2 host: /home on the data volume, code-server as ec2-user behind oauth2-proxy (Cognito).
+            # code2 host: /home on its own volume, code-server behind oauth2-proxy (Cognito).
             set -Eeuo pipefail
             exec > >(tee -a /var/log/code2-setup.log) 2>&1
             umask 022
@@ -629,7 +614,7 @@ Resources:
             idle_hours=${IdleStopHours}
             log() { echo "code2-setup: $(date -u +%FT%TZ) $*"; }
 
-            # First-boot result for CloudFormation (BootWait). Later boots signal too; CloudFormation ignores them.
+            # First-boot result for BootWait; later signals are ignored.
             signal() {
               local body
               body=$(python3 -c 'import json,sys; print(json.dumps({"Status": sys.argv[1], "Reason": sys.argv[2][-900:], "UniqueId": "code2", "Data": sys.argv[2][-900:]}))' "$1" "$2")
@@ -645,7 +630,7 @@ Resources:
 
             retry() { local n; for n in 1 2 3 4; do "$@" && return 0; log "retry $n: $1"; sleep $((n * 10)); done; "$@"; }
             dl() { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$2" "$1"; }
-            # put <path> <mode>: writes stdin to path when it differs; succeeds only when the file changed.
+            # put <path> <mode>: writes stdin if it differs; succeeds only when changed.
             put() {
               local tmp; tmp=$(mktemp)
               cat > "$tmp"
@@ -675,7 +660,7 @@ Resources:
             if [ ! -e "$dev" ]; then
               token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
               iid=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
-              # A replacement instance waits here until CloudFormation terminates the old one at the end of the update.
+              # A replacement waits here until the old instance terminates.
               for _ in $(seq 360); do
                 state=$(aws ec2 describe-volumes --region "$region" --volume-ids "$vol" \
                   --query 'Volumes[0].State' --output text 2>/dev/null || echo unknown)
@@ -748,7 +733,7 @@ Resources:
             id oauth2-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin oauth2-proxy
             install -d -m 750 -g oauth2-proxy /etc/oauth2-proxy
 
-            # The client id and URL are published once CloudFront is up (a few minutes after the first boot starts).
+            # Published once CloudFront is up.
             conf=
             for _ in $(seq 180); do
               conf=$(aws ssm get-parameter --region "$region" --name /${AWS::StackName}/oauth2-proxy \
@@ -778,8 +763,7 @@ Resources:
             cookie_refresh = "30m"
             silence_ping_logging = true
             CFG
-            # Secrets stay out of the log: the client secret is read here, the cookie key is made once and kept so
-            # sessions survive reboots.
+            # Secrets stay out of the log; the cookie key is kept across reboots.
             secret=$(aws cognito-idp describe-user-pool-client --region "$region" --user-pool-id ${UserPool} \
               --client-id "$client_id" --query UserPoolClient.ClientSecret --output text)
             cookie=$(sed -n 's/^OAUTH2_PROXY_COOKIE_SECRET=//p' /etc/oauth2-proxy/secrets.env 2>/dev/null || true)
@@ -813,7 +797,7 @@ Resources:
             systemctl enable oauth2-proxy
             if [ -n "$op_restart" ]; then systemctl restart oauth2-proxy; else systemctl start oauth2-proxy; fi
 
-            # ---- CloudWatch agent: this log, disk and memory use ----
+            # ---- CloudWatch agent ----
             put /opt/aws/amazon-cloudwatch-agent/etc/code2.json 644 <<'JSON' && cw_restart=1 || cw_restart=
             {
               "agent": { "metrics_collection_interval": 300 },
@@ -852,7 +836,7 @@ Resources:
             # ---- idle stop ----
             put /usr/local/sbin/code2-idle 755 <<'IDLE' || true
             #!/bin/bash
-            # code2-idle <hours>: powers off (stops) the instance after <hours> with no viewer, SSH session or load.
+            # code2-idle <hours>: stops the instance after <hours> with no viewer, SSH session or load.
             stamp=/run/code2-active
             if [ ! -f $stamp ] || ss -Htn state established '( sport = :80 or sport = :22 )' | grep -q . \
                || pgrep -u ssm-user >/dev/null || awk '{ exit !($1 > 0.5) }' /proc/loadavg; then
@@ -892,7 +876,7 @@ Resources:
             # ---- run this user data again on every boot ----
             put /var/lib/cloud/scripts/per-boot/code2-setup 755 <<'HOOK' || true
             #!/bin/bash
-            # Runs the instance's current user data (code2 setup) again, so template updates apply on restart.
+            # Reruns the current user data (code2 setup) on every boot.
             t=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
             curl -fsS -H "X-aws-ec2-metadata-token: $t" http://169.254.169.254/latest/user-data > /run/code2-userdata
             exec bash /run/code2-userdata
@@ -904,8 +888,7 @@ Resources:
           - VolumeSerial: !Join ["", !Split ["-", !Ref DataVolume]]   # nvme serial = volume id without the dash
             CognitoHost: !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
 
-  # Create waits for the first boot: a setup that fails (downloads, volume, Cognito) rolls the stack back with the
-  # failing line in the event reason, instead of finishing green and serving 502.
+  # Create waits for the first boot and rolls back on a failed setup, with the failing line in the reason.
   BootWait:
     Type: AWS::CloudFormation::WaitCondition
     Condition: WaitsForBoot
@@ -915,7 +898,7 @@ Resources:
       Timeout: "1800"
       Count: 1
 
-  # ---------- backups ----------
+  # --- backups ---
   BackupRole:
     Type: AWS::IAM::Role
     Condition: HasBackup
@@ -947,7 +930,7 @@ Resources:
             RetainRule: { Count: !Ref BackupRetainCount }
             CopyTags: true
 
-  # ---------- alarms (with AlarmEmail) ----------
+  # --- alarms (with AlarmEmail) ---
   AlarmTopic:
     Type: AWS::SNS::Topic
     Condition: HasAlarmEmail
@@ -1034,8 +1017,8 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
 
-  # ---------- edge ----------
-  # Two slots (see OriginSlot): slot a keeps the original logical id so existing stacks keep their origin.
+  # --- edge ---
+  # Two slots (see OriginSlot); slot a keeps the original logical id.
   InstanceVpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
     Condition: OriginSlotA
@@ -1082,8 +1065,7 @@ Resources:
               OriginReadTimeout: 60
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
-          # Everything dynamic: no caching, every viewer header and cookie forwarded (Host for code-server's
-          # WebSocket origin check, oauth2-proxy session cookies). CloudFront does not compress uncached responses.
+          # No caching; all viewer headers and cookies forwarded (Host for code-server's WebSocket check).
           TargetOriginId: code2-ec2
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
@@ -1114,7 +1096,7 @@ Outputs:
     Value: !Sub
       - "https://${Host}"
       - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
-  # Ends the oauth2-proxy session, then the Cognito one, and comes back to the site's sign-in.
+  # Ends the oauth2-proxy session, then Cognito's, and returns to sign-in.
   LogoutUrl:
     Value: !Sub
       - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
