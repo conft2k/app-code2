@@ -9,7 +9,7 @@ CloudFront → private EC2(Graviton) → code-server, Cognito 로그인(MFA)</p>
 
 - CloudFormation 스택 하나로 **전용 VPC, private EC2, CloudFront, Cognito 로그인**이 모두 만들어집니다. 미리 준비할 네트워크나 리소스는 없습니다. 이미 있는 VPC에 넣을 수도 있습니다.
 - 배포가 끝나면 받은 URL에 접속해 Cognito로 로그인(암호 + TOTP)합니다. 로그인하면 바로 VS Code가 열립니다.
-- 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.large`, 2 vCPU / 8 GiB, x86 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
+- 서버는 공인 IP가 없는 private 서브넷의 EC2(기본 `t4g.medium`, 2 vCPU / 4 GiB, 다른 Graviton·x86 타입도 가능)입니다. 외부에서 들어오는 길은 **CloudFront(HTTPS)** 와 **EC2 Instance Connect Endpoint(SSH, IAM 인증)** 두 가지뿐입니다.
 - 작업 공간(`/home`)은 별도 EBS 볼륨에 있어서 인스턴스를 바꿔도 남습니다. 매일 스냅샷으로 백업합니다.
 - 도메인은 없어도 됩니다. 기본으로 CloudFront 주소(`https://dxxxx.cloudfront.net`)를 쓰고, Route 53 도메인이 있으면 `code.example.com` 같은 주소로 붙일 수 있습니다.
 
@@ -116,7 +116,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 | 항목 | 값 |
 |---|---|
-| 인스턴스 | 기본 `t4g.large` (Graviton2, 2 vCPU, 8 GiB, 버스터블 standard: 평소 vCPU당 30%, 크레딧이 남아 있으면 100%). `m7g`, `m8g`, `t3`, `m7i` 등 다른 타입도 됩니다 |
+| 인스턴스 | 기본 `t4g.medium` (Graviton2, 2 vCPU, 4 GiB, 버스터블 standard: 평소 vCPU당 20%, 크레딧이 남아 있으면 100%). 4 GiB Graviton 중 가장 저렴합니다. 메모리가 모자라면 `t4g.large`(8 GiB), 그 밖에 `m7g`, `m8g`, `t3`, `m7i` 등도 됩니다 |
 | OS | Amazon Linux 2023 (arm64 또는 x86_64, 인스턴스 타입에 맞춤) |
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
@@ -172,7 +172,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_STACK` | `code2` | – | 스택 이름(소문자·숫자·하이픈, 50자 이하, `aws`/`amazon`/`cognito` 포함 불가: Cognito 도메인 접두사로 쓰입니다). 이름을 달리하면 한 계정에 여러 대를 만들 수 있습니다 |
 | `CODE2_ACCOUNT` | 없음 | – | 지정하면 다른 계정의 자격 증명으로는 실행하지 않습니다 |
 | `AWS_REGION` | `AWS_DEFAULT_REGION` → 프로필 리전 → `ap-northeast-2` | – | 배포 리전 |
-| `CODE2_INSTANCE_TYPE` | `t4g.large` | 언제든 | 같은 아키텍처면 중지 후 시작, 아키텍처가 다르면 인스턴스 교체 |
+| `CODE2_INSTANCE_TYPE` | `t4g.medium` | 언제든 | 같은 아키텍처면 중지 후 시작, 아키텍처가 다르면 인스턴스 교체 |
 | `CODE2_DATA_SIZE` | `50` | 늘리기만 | `/home` GiB. 늘리면 다음 설정 실행 때 파일시스템도 늘립니다 |
 | `CODE2_ROOT_SIZE` | `30` | 언제든 | `/` GiB. 바꾸면 인스턴스 교체 |
 | `CODE2_CODE_SERVER_VERSION` / `CODE2_OAUTH2_PROXY_VERSION` | `4.139.1` / `7.15.5` | 언제든 | 바꾸면 인스턴스가 중지 후 시작되며 새 버전을 설치합니다 |
@@ -193,7 +193,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 예: 인스턴스를 키우고 code-server를 올리기
 
 ```bash
-CODE2_INSTANCE_TYPE=m7g.large CODE2_CODE_SERVER_VERSION=4.140.0 infra/deploy.sh stack plan
+CODE2_INSTANCE_TYPE=t4g.large CODE2_CODE_SERVER_VERSION=4.140.0 infra/deploy.sh stack plan
 infra/deploy.sh stack apply      # 인스턴스가 중지 후 시작되며 새 버전을 설치합니다 (몇 분 다운타임)
 infra/deploy.sh status           # 설치된 버전 확인
 ```
@@ -280,7 +280,7 @@ sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)
 - `/home` 볼륨은 줄일 수 없습니다. AZ, 네트워크, 도메인, 복구 스냅샷은 처음 만들 때 정하며, 바꾸려면 스택을 새로 만듭니다(스냅샷으로 `/home`을 옮길 수 있습니다).
 - 리전에 CloudFront VPC origin을 지원하지 않는 AZ가 있을 수 있습니다. 생성이 VPC origin에서 실패하면 `CODE2_AZ`로 다른 AZ를 지정합니다.
 - EC2 Instance Connect Endpoint는 계정·리전마다 개수 제한(기본 5개)이 있고, VPC당 하나입니다.
-- 버스터블 크레딧이 떨어지면 CPU가 vCPU당 30%로 제한됩니다(standard 모드라 추가 요금은 없음). 빌드가 자주 느리면 `m7g.large`로 바꾸는 것을 검토합니다.
+- 버스터블 크레딧이 떨어지면 CPU가 vCPU당 20%(`t4g.large`는 30%)로 제한됩니다(standard 모드라 추가 요금은 없음). 빌드가 자주 느리면 `m7g.large`로, 메모리가 모자라면(확장을 많이 쓰거나 빌드가 크면 4 GiB로는 빠듯합니다) `t4g.large`로 바꾸는 것을 검토합니다.
 - 상용 AWS 파티션(`aws`)에서만 동작합니다(CloudFront VPC origin).
 
 ### 이전 버전으로 만든 스택 옮기기
@@ -324,16 +324,16 @@ code2/
 
 | 항목 | 금액 |
 |---|---|
-| EC2 t4g.large (24시간 상시) | 약 $61 |
+| EC2 t4g.medium (24시간 상시, `t4g.large`면 약 $61) | 약 $30 |
 | NAT Gateway (시간 요금, 데이터 $0.059/GB 별도) | 약 $43 |
 | 공인 IPv4 (NAT EIP) | 약 $3.6 |
 | EBS gp3 30 + 50 GiB | 약 $7 |
 | `/home` 스냅샷 7개 (변경분만 저장) | 약 $1–3 |
 | CloudWatch 지표 3개, 로그, 알람 (알람은 지정 시) | 약 $1–2 |
 | CloudFront, Cognito(Essentials 무료 구간), EICE, Route 53 | 약 $1 미만 |
-| **합계** | **약 $118–121** |
+| **합계** | **약 $87–90** |
 
-- 인스턴스를 중지하면 EC2 요금(약 $61)은 나가지 않지만, NAT Gateway·IPv4·EBS 요금은 계속 나갑니다.
+- 인스턴스를 중지하면 EC2 요금(약 $30)은 나가지 않지만, NAT Gateway·IPv4·EBS 요금은 계속 나갑니다.
 - 기존 VPC를 쓰면 NAT와 IPv4 요금(약 $46)이 빠집니다.
 - 요금은 리전과 시점에 따라 다르니 [AWS 요금 계산기](https://calculator.aws/)로 확인합니다.
 

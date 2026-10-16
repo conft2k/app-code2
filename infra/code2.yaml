@@ -93,7 +93,7 @@ Parameters:
       one on create and keeps it on update unless asked to move on (a new AMI replaces the instance; /home stays).
   InstanceType:
     Type: String
-    Default: t4g.large
+    Default: t4g.medium
     AllowedPattern: '^[a-z][a-z0-9-]*\.[a-z0-9]+$'
     Description: Any type (Graviton or x86); ImageId must match its architecture
   RootVolumeSize:
