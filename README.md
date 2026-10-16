@@ -194,13 +194,12 @@ aws cloudformation delete-stack --stack-name code2
 ```
 code2/
 ├── README.md
-├── docs/            구성도 (아래)
+├── docs/
+│   ├── architecture.png   README 구성도
+│   └── architecture.svg   구성도 원본 (아이콘 포함, 브라우저·Inkscape·draw.io에서 편집)
 └── infra/
-    ├── code2.yaml   CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin, (선택) Route 53
-    └── deploy.sh    change set plan/apply, status, ssh, ssh-config, shell, stop/start
-docs/
-├── architecture.png   README 구성도
-└── architecture.svg   구성도 원본 (아이콘 포함, 브라우저·Inkscape·draw.io에서 편집)
+    ├── code2.yaml         CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin, (선택) Route 53
+    └── deploy.sh          change set plan/apply, status, ssh, ssh-config, shell, stop/start
 ```
 
 ## 예상 비용 (서울, 월, 대략)
