@@ -1,0 +1,583 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  code2 - a personal VS Code server in the browser. CloudFront (VPC origin) -> private Graviton EC2
+  (oauth2-proxy :80 signs in with Cognito + TOTP -> code-server 127.0.0.1:8080). Self-contained: its own VPC,
+  NAT gateway for egress and an EC2 Instance Connect Endpoint for SSH. A custom domain is optional; without
+  one the site is served on the distribution's *.cloudfront.net name. Deployed with infra/deploy.sh.
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+    Description: NAT gateway subnet
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.42.1.0/24
+    Description: Instance and EC2 Instance Connect Endpoint subnet
+  DomainName:
+    Type: String
+    Default: ""
+    Description: Optional custom name (e.g. code.example.com). Leave empty to use the CloudFront domain.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Route 53 public hosted zone of DomainName (only with DomainName)
+  CertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
+    Description: ACM certificate in us-east-1 covering DomainName (only with DomainName)
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      AL2023 arm64 AMI. deploy.sh resolves the latest one on create and keeps the previous value on update
+      (a new AMI replaces the instance).
+  InstanceType:
+    Type: String
+    Default: t4g.large
+    AllowedValues: [t4g.medium, t4g.large, t4g.xlarge, m7g.large, m7g.xlarge, r8g.medium, r8g.large]
+  DataVolumeSize:
+    Type: Number
+    Default: 50
+    MinValue: 20
+    Description: GiB of the /home volume (kept as a snapshot when the stack deletes it)
+  CodeServerVersion:
+    Type: String
+    Default: 4.139.1
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+  OAuth2ProxyVersion:
+    Type: String
+    Default: 7.15.5
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+  AdminUsername:
+    Type: String
+    Default: admin
+    AllowedPattern: '^[a-zA-Z0-9._-]+$'
+    Description: The account Cognito creates and emails a temporary password to
+  AdminEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
+    Description: Where the temporary password goes
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+  # ---------- network ----------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+
+  # CloudFront VPC origins require an internet gateway on the VPC; only the NAT gateway uses it.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pub" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pub" }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRouteTable }
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eip-natgw" }]
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt NatEip.AllocationId
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-natgw" }]
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnetCidr
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-subnet-pri" }]
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rtb-pri" }]
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRouteTable }
+
+  # Keeps dnf repos and other S3 traffic off the NAT gateway.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds: [!Ref PrivateRouteTable]
+
+  # ---------- security groups ----------
+  # :80 is open to the VPC range because CloudFront's VPC origin ENIs (CloudFront-VPCOrigins-Service-SG) only
+  # appear after the origin exists. Nothing else in this VPC listens or sends there: the EICE can only reach :22.
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: code2 EC2 - oauth2-proxy :80 from CloudFront (VPC origin), SSH from the EICE
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: CloudFront VPC origin }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: "dev box: git, package registries, extensions (NAT)" }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-ec2" }]
+
+  EiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: code2 EC2 Instance Connect Endpoint - SSH to the instance only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, DestinationSecurityGroupId: !Ref InstanceSecurityGroup,
+            Description: SSH to the code2 instance }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-eice" }]
+
+  InstanceSshFromEice:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref EiceSecurityGroup
+      Description: EC2 Instance Connect Endpoint
+
+  InstanceConnectEndpoint:
+    Type: AWS::EC2::InstanceConnectEndpoint
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref EiceSecurityGroup]
+      PreserveClientIp: false
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-eice" }]
+
+  # ---------- sign-in ----------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: ACTIVE
+      AliasAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration: { CaseSensitive: false }
+      # A shell with sudo sits behind this login: TOTP is required, set up on first sign-in.
+      MfaConfiguration: "ON"
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: "[code2] VS Code 계정이 만들어졌습니다"
+          # Without a custom domain the URL is only known after the distribution exists: deploy.sh status shows it.
+          EmailMessage: !If
+            - HasDomain
+            - !Sub >-
+              code2 (VS Code) 계정입니다.<br><br>
+              사용자 이름: {username}<br>임시 암호: {####}<br><br>
+              https://${DomainName} 에 접속해 위 정보로 로그인한 뒤 새 암호와 인증 앱(TOTP)을 등록해 주세요.
+              임시 암호는 7일 동안 쓸 수 있습니다.
+            - >-
+              code2 (VS Code) 계정입니다.<br><br>
+              사용자 이름: {username}<br>임시 암호: {####}<br><br>
+              code2 주소(infra/deploy.sh status 의 url)에 접속해 위 정보로 로그인한 뒤 새 암호와 인증 앱(TOTP)을
+              등록해 주세요. 임시 암호는 7일 동안 쓸 수 있습니다.
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: false
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms: [{ Name: verified_email, Priority: 1 }]
+      Schema:
+        - { Name: email, AttributeDataType: String, Required: true, Mutable: true }
+      UserPoolTags: { project: code2 }
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: code2-oauth2-proxy
+      GenerateSecret: true              # confidential client; the instance reads the secret at boot
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs:
+        - !Sub
+          - "https://${Host}/oauth2/callback"
+          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+      LogoutURLs:
+        - !Sub
+          - "https://${Host}/"
+          - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      IdTokenValidity: 60
+      AccessTokenValidity: 60
+      RefreshTokenValidity: 12
+      TokenValidityUnits: { IdToken: minutes, AccessToken: minutes, RefreshToken: hours }
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub "${AWS::StackName}-${AWS::AccountId}"
+      ManagedLoginVersion: 2
+
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+  AdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserPoolId: !Ref UserPool
+      Username: !Ref AdminUsername
+      DesiredDeliveryMediums: [EMAIL]
+      ForceAliasCreation: true          # a replaced user takes the email alias over from the old one
+      UserAttributes:
+        - { Name: email, Value: !Ref AdminEmail }
+        - { Name: email_verified, Value: "true" }
+
+  # The instance cannot reference the client or the distribution directly (the distribution points at the
+  # instance), so their values reach it through this parameter, which it polls at boot.
+  OAuth2ProxyConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${AWS::StackName}/oauth2-proxy"
+      Type: String
+      Description: code2 oauth2-proxy client id and public URL, read by the instance at boot
+      Value: !Sub
+        - '{"clientId":"${UserPoolClient}","url":"https://${Host}"}'
+        - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+
+  # ---------- compute ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: code2 EC2 - SSM management, reads its own Cognito client secret and oauth2-proxy settings at boot
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: code2-auth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ClientSecret
+                Effect: Allow
+                Action: cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt UserPool.Arn
+              - Sid: ProxyConfig
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/oauth2-proxy"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # /home lives here so a replaced instance keeps the workspace. Deleting the stack leaves a snapshot.
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ebs-home" }]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: [PrivateDefaultRoute, PrivateSubnetRoutes]   # user data downloads code-server and oauth2-proxy from GitHub
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      CreditSpecification: { CPUCredits: standard }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ec2" }]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            # code2 host: /home on the data volume, code-server as ec2-user behind oauth2-proxy (Cognito).
+            set -euxo pipefail
+            dnf install -y -q git tmux jq gcc make tar xfsprogs python3-pip
+
+            # ---- /home on the data volume (attached right after launch; wait for it) ----
+            dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${VolumeSerial}
+            for _ in $(seq 120); do [ -e "$dev" ] && break; sleep 5; done
+            [ -e "$dev" ]
+            if ! blkid "$dev" >/dev/null; then
+              mkfs.xfs -L code2-home "$dev"
+              mount "$dev" /mnt && cp -a /home/. /mnt/ && umount /mnt
+            fi
+            grep -q code2-home /etc/fstab || echo 'LABEL=code2-home /home xfs defaults,nofail 0 2' >> /etc/fstab
+            mount /home
+
+            # ---- code-server ----
+            cs=/usr/local/lib/code-server-${CodeServerVersion}
+            if [ ! -d "$cs" ]; then
+              curl -fsSL "https://github.com/coder/code-server/releases/download/v${CodeServerVersion}/code-server-${CodeServerVersion}-linux-arm64.tar.gz" \
+                | tar -xz -C /usr/local/lib
+              mv "/usr/local/lib/code-server-${CodeServerVersion}-linux-arm64" "$cs"
+            fi
+            ln -sfn "$cs/bin/code-server" /usr/local/bin/code-server
+            cat > /etc/systemd/system/code-server.service <<'UNIT'
+            [Unit]
+            Description=code-server (VS Code) for ec2-user
+            After=network-online.target home.mount
+            Wants=network-online.target
+            RequiresMountsFor=/home/ec2-user
+
+            [Service]
+            User=ec2-user
+            WorkingDirectory=/home/ec2-user
+            Environment=HOME=/home/ec2-user
+            ExecStart=/usr/local/bin/code-server --bind-addr 127.0.0.1:8080 --auth none --disable-telemetry --disable-update-check
+            Restart=always
+            RestartSec=2
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+
+            # ---- oauth2-proxy (Cognito OIDC) on :80 ----
+            op=oauth2-proxy-v${OAuth2ProxyVersion}.linux-arm64
+            cd /tmp
+            curl -fsSLO "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${OAuth2ProxyVersion}/$op.tar.gz"
+            curl -fsSLO "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v${OAuth2ProxyVersion}/$op.tar.gz-sha256sum.txt"
+            sha256sum -c "$op.tar.gz-sha256sum.txt"
+            tar -xzf "$op.tar.gz" && install -m 755 "$op/oauth2-proxy" /usr/local/bin/oauth2-proxy
+            id oauth2-proxy >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin oauth2-proxy
+            install -d -m 750 -g oauth2-proxy /etc/oauth2-proxy
+
+            # The client id and URL are published once CloudFront is up (a few minutes after this instance starts).
+            systemctl daemon-reload
+            systemctl enable --now code-server
+            for _ in $(seq 180); do
+              conf=$(aws ssm get-parameter --region ${AWS::Region} --name /${AWS::StackName}/oauth2-proxy \
+                --query Parameter.Value --output text 2>/dev/null) && break
+              sleep 10
+            done
+            [ -n "$conf" ] || { echo "oauth2-proxy settings never appeared in SSM" >&2; exit 1; }
+            client_id=$(jq -r .clientId <<<"$conf")
+            url=$(jq -r .url <<<"$conf")
+            cat > /etc/oauth2-proxy/oauth2-proxy.cfg <<CFG
+            http_address = "0.0.0.0:80"
+            upstreams = ["http://127.0.0.1:8080/"]
+            provider = "oidc"
+            provider_display_name = "Cognito"
+            oidc_issuer_url = "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+            client_id = "$client_id"
+            redirect_url = "$url/oauth2/callback"
+            scope = "openid email profile"
+            code_challenge_method = "S256"
+            email_domains = ["*"]
+            skip_provider_button = true
+            cookie_name = "_code2"
+            cookie_secure = true
+            cookie_samesite = "lax"
+            cookie_expire = "12h"
+            cookie_refresh = "30m"
+            silence_ping_logging = true
+            CFG
+            secret=$(aws cognito-idp describe-user-pool-client --region ${AWS::Region} --user-pool-id ${UserPool} \
+              --client-id "$client_id" --query UserPoolClient.ClientSecret --output text)
+            cookie=$(python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+            umask 077
+            printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret" "$cookie" > /etc/oauth2-proxy/secrets.env
+            umask 022
+            cat > /etc/systemd/system/oauth2-proxy.service <<'UNIT'
+            [Unit]
+            Description=oauth2-proxy (Cognito sign-in in front of code-server)
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            User=oauth2-proxy
+            Group=oauth2-proxy
+            EnvironmentFile=/etc/oauth2-proxy/secrets.env
+            ExecStart=/usr/local/bin/oauth2-proxy --config=/etc/oauth2-proxy/oauth2-proxy.cfg
+            AmbientCapabilities=CAP_NET_BIND_SERVICE
+            CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+            NoNewPrivileges=yes
+            ProtectSystem=strict
+            ProtectHome=yes
+            PrivateTmp=yes
+            Restart=always
+            RestartSec=2
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now oauth2-proxy
+          - VolumeSerial: !Join ["", !Split ["-", !Ref DataVolume]]   # nvme serial = volume id without the dash
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  # ---------- edge ----------
+  InstanceVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    DependsOn: GatewayAttachment
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${AWS::StackName}-vpco-ec2"
+        Arn: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}"
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} VS Code server"
+        Aliases: !If [HasDomain, [!Ref DomainName], !Ref "AWS::NoValue"]
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        ViewerCertificate: !If
+          - HasDomain
+          - { AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021 }
+          - { CloudFrontDefaultCertificate: true }
+        Origins:
+          - Id: code2-ec2
+            DomainName: !GetAtt Instance.PrivateDnsName
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt InstanceVpcOrigin.Id
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          # Everything dynamic: no caching, every viewer header and cookie forwarded (Host for code-server's
+          # WebSocket origin check, oauth2-proxy session cookies).
+          TargetOriginId: code2-ec2
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad        # Managed-CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
+
+  DnsA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
+
+  DnsAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2 }
+
+Outputs:
+  Url:
+    Value: !Sub
+      - "https://${Host}"
+      - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+  InstanceId:
+    Value: !Ref Instance
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+  InstanceConnectEndpointId:
+    Value: !Ref InstanceConnectEndpoint
+  UserPoolId:
+    Value: !Ref UserPool
+  DistributionId:
+    Value: !Ref Distribution
+  NatPublicIp:
+    Value: !Ref NatEip
+  DataVolumeId:
+    Value: !Ref DataVolume
