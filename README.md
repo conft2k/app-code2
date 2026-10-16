@@ -206,7 +206,7 @@ infra/deploy.sh status           # 설치된 버전 확인
 
 ### 인스턴스 교체
 
-AMI, 루트 볼륨 크기, 아키텍처가 바뀌면 인스턴스가 교체됩니다.
+AMI, 루트 볼륨 크기, 아키텍처가 바뀌면 인스턴스가 교체됩니다. 버전·설정처럼 user data만 바뀌면 교체 없이 중지 후 시작합니다(CloudFormation 변경 세트는 이때도 `Conditional`로 표시하지만, `plan`은 교체로 보지 않습니다).
 
 1. CloudFormation이 새 인스턴스를 만듭니다. 새 인스턴스는 `/home` 볼륨이 풀릴 때까지 기다립니다.
 2. CloudFront VPC origin은 배포에 연결된 채로 다른 인스턴스를 가리키도록 바꿀 수 없습니다. 그래서 `plan`이 인스턴스 재생성을 감지하면 VPC origin 슬롯(`OriginSlot`, a↔b)을 바꿉니다. 새 인스턴스용 VPC origin을 만들고 배포를 그쪽으로 돌립니다.
@@ -258,6 +258,14 @@ aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름
 ```
 
 모든 계정은 같은 서버의 같은 `ec2-user`로 들어갑니다. 사람마다 따로 환경이 필요하면 `CODE2_STACK`을 달리해 스택을 하나씩 만듭니다.
+
+암호를 잊었으면 로그인 페이지의 **Forgot your password?**에서 등록된 메일로 코드를 받아 재설정합니다. 첫 로그인 전(`FORCE_CHANGE_PASSWORD`)에는 재설정이 안 되므로, 초대 메일을 다시 보냅니다(새 임시 암호가 발급되고 이전 것은 무효가 됩니다).
+
+```bash
+aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름> --message-action RESEND
+```
+
+메일은 Cognito 기본 발신자(`no-reply@verificationemail.com`)로 오며 스팸함으로 갈 수 있습니다. 하루 발송 한도는 50통입니다.
 
 `CODE2_ADMIN_USER`를 바꾸고 `stack plan`/`apply`를 하면, Cognito는 사용자 이름을 바꿀 수 없으므로 사용자를 새로 만들고(임시 암호 재발송, TOTP 재등록) 이전 사용자는 삭제합니다. 업데이트할 때 `CODE2_ADMIN_USER`를 지정하지 않으면 현재 이름을 그대로 씁니다.
 
