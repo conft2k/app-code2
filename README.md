@@ -48,67 +48,9 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 ### 전체 구성
 
-```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 28, "rankSpacing": 42, "padding": 10}}}%%
-flowchart TB
-  laptop(["💻 노트북 · ssh"])
-  user(["🧑‍💻 브라우저"])
-
-  subgraph aws["☁️ AWS 계정 · 리전"]
-    cf["CloudFront<br/>HTTPS · 캐시 없음"]
-    cognito["Cognito<br/>암호 + TOTP"]
-    ssm["SSM Parameter<br/>Store"]
-
-    subgraph vpc["VPC 10.42.0.0/16"]
-      subgraph pub["public subnet"]
-        nat["NAT Gateway<br/>→ Internet Gateway"]
-      end
-      subgraph pri["🔒 private subnet"]
-        subgraph ec2["EC2 · Graviton t4g.large"]
-          proxy["oauth2-proxy :80"]
-          code["code-server<br/>127.0.0.1:8080"]
-          home[("/home EBS")]
-        end
-        eice["EC2 Instance<br/>Connect Endpoint"]
-      end
-    end
-  end
-
-  internet(["🌐 인터넷<br/>GitHub · npm · PyPI"])
-
-  user -->|"① HTTPS"| cf
-  cf -->|"② VPC origin"| proxy
-  proxy -->|"③ 프록시 · WS"| code
-  code --- home
-  laptop --->|"IAM 터널"| eice
-  eice -->|"SSH 22"| code
-  proxy -.->|"OIDC"| cognito
-  ssm -.->|"부팅 설정"| proxy
-  code -->|"아웃바운드"| nat
-  nat --> internet
-
-  classDef client fill:#F3F4F6,stroke:#6B7280,color:#111827
-  classDef edge fill:#EDE4FF,stroke:#8C4FFF,color:#2E1065
-  classDef security fill:#FDE2E6,stroke:#DD344C,color:#5C0B16
-  classDef compute fill:#FFE9D6,stroke:#ED7100,color:#4A2300
-  classDef network fill:#E9F3DA,stroke:#7AA116,color:#2F4207
-  classDef storage fill:#DFF3E4,stroke:#3F8624,color:#173A10
-  classDef mgmt fill:#FCE4F0,stroke:#E7157B,color:#5B0830
-
-  class user,laptop,internet client
-  class cf edge
-  class cognito security
-  class proxy,code compute
-  class eice,nat network
-  class home storage
-  class ssm mgmt
-
-  style aws fill:none,stroke:#232F3E,stroke-width:2px
-  style vpc fill:none,stroke:#8C4FFF,stroke-width:2px
-  style pri fill:none,stroke:#00A4A6,stroke-width:1.5px,stroke-dasharray:6 4
-  style pub fill:none,stroke:#7AA116,stroke-width:1.5px,stroke-dasharray:6 4
-  style ec2 fill:none,stroke:#ED7100,stroke-width:1.5px
-```
+<p align="center">
+  <img src="docs/architecture.png" alt="code2 아키텍처: 브라우저 → CloudFront → VPC origin → private subnet의 EC2(oauth2-proxy → code-server, /home EBS). Cognito 로그인, SSM으로 부팅 설정, EC2 Instance Connect Endpoint로 SSH, NAT Gateway로 아웃바운드" width="100%">
+</p>
 
 실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소 같은 S3 트래픽은 그림에 없는 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다.
 
@@ -252,9 +194,13 @@ aws cloudformation delete-stack --stack-name code2
 ```
 code2/
 ├── README.md
+├── docs/            구성도 (아래)
 └── infra/
     ├── code2.yaml   CloudFormation: VPC·NAT·EICE, Cognito, EC2·EBS, CloudFront VPC origin, (선택) Route 53
     └── deploy.sh    change set plan/apply, status, ssh, ssh-config, shell, stop/start
+docs/
+├── architecture.png   README 구성도
+└── architecture.svg   구성도 원본 (아이콘 포함, 브라우저·Inkscape·draw.io에서 편집)
 ```
 
 ## 예상 비용 (서울, 월, 대략)
