@@ -58,7 +58,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 - 스크립트가 서브넷의 AZ, VPC CIDR, 인터넷 게이트웨이, NAT 경로를 확인합니다.
 - 그 VPC에 EC2 Instance Connect Endpoint가 이미 있으면 그것을 씁니다(VPC당 하나). 그 엔드포인트의 보안 그룹은 인스턴스의 22번으로 나갈 수 있어야 합니다.
-- 인스턴스의 `:80`은 VPC CIDR 전체에 열립니다(CloudFront VPC origin ENI). 같은 VPC의 다른 워크로드도 닿을 수 있으니, 다른 워크로드와 함께 쓰는 VPC라면 이 점을 감안합니다.
+- 인스턴스의 `:80`은 CloudFront origin-facing 관리형 prefix list에서만 열리므로, 같은 VPC의 다른 워크로드는 닿을 수 없습니다.
 - NAT Gateway와 공인 IPv4 요금(월 약 $46)이 들지 않습니다.
 
 ## 동작 아키텍처
@@ -100,7 +100,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 | 영역 | 설정 |
 |---|---|
-| 인바운드 | 인스턴스 보안 그룹: `:80`은 VPC 대역에서만(CloudFront VPC origin ENI), `:22`는 EICE 보안 그룹에서만 허용합니다. 공인 IP는 없습니다 |
+| 인바운드 | 인스턴스 보안 그룹: `:80`은 CloudFront origin-facing 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)에서만, `:22`는 EICE 보안 그룹에서만 허용합니다. VPC origin 요청은 ENI의 VPC 주소가 아니라 이 대역에서 들어옵니다. 공인 IP는 없습니다 |
 | 로그인 | User Pool은 관리자만 계정을 만들 수 있고, **TOTP MFA가 필수**입니다. 암호는 최소 12자이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
 | 비밀값 | Cognito 클라이언트 시크릿은 부팅할 때 인스턴스 역할(`cognito-idp:DescribeUserPoolClient`, 이 User Pool로 한정)로 직접 읽습니다. 쿠키 서명 키는 인스턴스에서 한 번 생성해 재부팅해도 유지합니다. 둘 다 `/etc/oauth2-proxy/secrets.env`(600)에만 있고, 템플릿·파라미터·저장소·로그에는 없습니다 |
 | 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
