@@ -34,7 +34,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 1. `CODE2_ADMIN_EMAIL`로 임시 암호가 옵니다(7일 유효).
 2. `status`에 나온 URL에 접속해 임시 암호로 로그인합니다.
-3. 새 암호(12자 이상)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
+3. 새 암호(기본 12자 이상, `CODE2_PASSWORD_MIN_LENGTH`)를 정하고 인증 앱(Google Authenticator, 1Password 등)에 TOTP를 등록합니다(`CODE2_MFA=off`면 암호만 정합니다).
 
 `stack apply`는 인스턴스가 code-server와 oauth2-proxy를 다 띄웠다고 알려 올 때까지 기다립니다. 설정이 실패하면(다운로드 실패, Cognito 설정 오류 등) 스택이 롤백되고, 실패한 줄과 로그 끝부분이 `BootWait` 이벤트 사유에 나옵니다. 원인을 인스턴스에서 직접 보려면 `CODE2_KEEP_ON_FAILURE=1 infra/deploy.sh stack apply`로 롤백 없이 실행합니다.
 
@@ -47,6 +47,8 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 3. 첫 `stack plan` 전에 `CODE2_DOMAIN=code.example.com`을 지정합니다. 스크립트가 도메인이 속한 공개 호스티드 존과 인증서를 찾아 넣고, A/AAAA 레코드를 만듭니다. 자동으로 못 찾으면 `CODE2_ZONE`(존 이름) 또는 `CODE2_ZONE_ID`, `CODE2_CERT_ARN`으로 지정합니다.
 
 도메인은 처음 만들 때 정합니다. 나중에 바꾸면 Cognito 콜백 주소와 인스턴스 설정이 어긋나므로, 스택을 새로 만드는 편이 안전합니다.
+
+Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기본은 `<스택>-<계정>.auth.<리전>.amazoncognito.com`). `CODE2_AUTH_DOMAIN=auth.code.example.com`처럼 `CODE2_DOMAIN` 아래 이름을 지정하면, 스크립트가 그 이름을 덮는 us-east-1 인증서(`CODE2_AUTH_CERT_ARN`로 지정 가능)를 찾아 넣고 A/AAAA 레코드를 만듭니다. Cognito는 상위 이름(`code.example.com`)의 A 레코드가 있어야 커스텀 도메인을 만들 수 있어서, 사이트 레코드가 생긴 뒤에 만들어집니다. 생성 후에도 켜고 끌 수 있습니다(도메인이 교체되고 인스턴스는 중지 후 시작되며, 그동안 로그인이 잠시 안 될 수 있습니다).
 
 ### 이미 있는 VPC 쓰기 (선택)
 
@@ -102,7 +104,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 영역 | 설정 |
 |---|---|
 | 인바운드 | 인스턴스 보안 그룹: `:80`은 CloudFront origin-facing 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)에서만, `:22`는 EICE 보안 그룹에서만 허용합니다. VPC origin 요청은 ENI의 VPC 주소가 아니라 이 대역에서 들어옵니다. 공인 IP는 없습니다 |
-| 로그인 | User Pool은 관리자만 계정을 만들 수 있고, 기본으로 **TOTP MFA가 필수**입니다(`CODE2_MFA=off`로 끌 수 있지만, sudo 셸이 걸린 로그인이라 권하지 않습니다). 암호는 최소 12자이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
+| 로그인 | User Pool은 관리자만 계정을 만들 수 있고, 기본으로 **TOTP MFA가 필수**입니다(`CODE2_MFA=off`로 끌 수 있지만, sudo 셸이 걸린 로그인이라 권하지 않습니다). 암호는 기본 최소 12자(`CODE2_PASSWORD_MIN_LENGTH`, 8–99)이며 소문자와 숫자를 반드시 넣어야 합니다. 삭제 보호를 켜 두었고 스택을 지워도 남습니다(`Retain`) |
 | 비밀값 | Cognito 클라이언트 시크릿은 부팅할 때 인스턴스 역할(`cognito-idp:DescribeUserPoolClient`, 이 User Pool로 한정)로 직접 읽습니다. 쿠키 서명 키는 인스턴스에서 한 번 생성해 재부팅해도 유지합니다. 둘 다 `/etc/oauth2-proxy/secrets.env`(600)에만 있고, 템플릿·파라미터·저장소·로그에는 없습니다 |
 | 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
 | 인스턴스 | IMDSv2 필수(hop limit 1), EBS 암호화, oauth2-proxy는 전용 시스템 사용자로 실행하고 `:80` 바인딩 권한만 가집니다(`ProtectSystem=strict`) |
@@ -187,6 +189,8 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_UPDATE_AMI=1` | – | 업데이트 때 | 최신 AL2023 AMI로 인스턴스를 교체합니다 |
 | `CODE2_KEEP_ON_FAILURE=1` | – | apply 때 | 실패해도 롤백하지 않습니다(원인 조사용) |
 | `CODE2_SSH_KEY` | `~/.ssh/id_ed25519` | – | SSH에 쓸 키(없으면 만듭니다) |
+| `CODE2_PASSWORD_MIN_LENGTH` | `12` | 언제든 | 최소 암호 길이(8–99). 이미 정한 암호에는 적용되지 않습니다 |
+| `CODE2_AUTH_DOMAIN`, `CODE2_AUTH_CERT_ARN` | 없음 | 언제든 | Cognito 로그인 페이지 도메인(위 "내 도메인 쓰기"). 빈 값으로 지정하면 기본 도메인으로 돌아갑니다 |
 | `CODE2_DOMAIN`, `CODE2_ZONE`, `CODE2_ZONE_ID`, `CODE2_CERT_ARN` | 없음 | 생성 때만 | 내 도메인 |
 | `CODE2_AZ` | 인스턴스 타입을 제공하는 첫 AZ | 생성 때만 | 인스턴스와 `/home`의 AZ |
 | `CODE2_VPC_ID`, `CODE2_SUBNET_ID` | 없음 | 생성 때만 | 기존 VPC 사용 |
@@ -317,10 +321,10 @@ code2/
     ├── code2.yaml               CloudFormation: VPC·NAT·EICE(또는 기존 VPC), Cognito, EC2·EBS, CloudFront VPC origin,
     │                            CloudWatch 로그·알람, DLM 백업, (선택) Route 53
     ├── deploy.sh                plan/apply(사전 점검·이관 포함), status, logs, reconfigure, ssh, shell, stop/start, destroy
-    └── lint.sh                  cfn-lint, shellcheck (deploy.sh와 user data)
+    └── lint.sh                  cfn-lint, shellcheck (deploy.sh와 user data), 템플릿 크기, 개인 정보 검사
 ```
 
-바꾼 뒤에는 `infra/lint.sh`로 검사합니다(`pip install cfn-lint`, `shellcheck` 필요).
+바꾼 뒤에는 `infra/lint.sh`로 검사합니다(`pip install cfn-lint`, `shellcheck` 필요). 공개 저장소라서 실제 계정 ID, 리소스 ID, 이메일, 도메인이 들어가면 실패합니다. 예시는 `example.com`과 `vpc-0123...` 같은 자리 표시자를 씁니다.
 
 ## 예상 비용 (서울, 월, 대략)
 

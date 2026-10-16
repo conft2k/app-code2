@@ -8,7 +8,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Sign-in }
-        Parameters: [AdminUsername, AdminEmail, Mfa, SessionHours]
+        Parameters: [AdminUsername, AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
                      OAuth2ProxyVersion, AutoUpdates, IdleStopHours]
@@ -18,7 +18,7 @@ Metadata:
         Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
                      ExistingEiceId, ExistingEiceSecurityGroupId]
       - Label: { default: Edge }
-        Parameters: [DomainName, HostedZoneId, CertificateArn, PriceClass]
+        Parameters: [DomainName, HostedZoneId, CertificateArn, AuthDomainName, AuthCertificateArn, PriceClass]
 
 Parameters:
   AvailabilityZone:
@@ -77,6 +77,16 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
     Description: ACM certificate in us-east-1 covering DomainName (only with DomainName)
+  AuthDomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional Cognito sign-in name under DomainName (e.g. auth.code.example.com); empty uses the prefix domain
+  AuthCertificateArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws:acm:us-east-1:\\d{12}:certificate/.+$"
+    Description: ACM certificate in us-east-1 covering AuthDomainName (only with AuthDomainName)
   PriceClass:
     Type: String
     Default: PriceClass_200
@@ -141,6 +151,12 @@ Parameters:
     AllowedValues: ["on", "off"]
     # No OPTIONAL: managed login never offers TOTP setup in it.
     Description: "on: TOTP set up on first sign-in and asked every time; off: password only"
+  PasswordMinLength:
+    Type: Number
+    Default: 12
+    MinValue: 8
+    MaxValue: 99
+    Description: Minimum password length (lowercase letters and digits are always required)
   BackupRetainCount:
     Type: Number
     Default: 7
@@ -183,6 +199,13 @@ Rules:
         AssertDescription: DomainName needs HostedZoneId (its Route 53 public hosted zone)
       - Assert: !Not [!Equals [!Ref CertificateArn, ""]]
         AssertDescription: DomainName needs CertificateArn (an issued us-east-1 ACM certificate covering it)
+  AuthDomain:
+    RuleCondition: !Not [!Equals [!Ref AuthDomainName, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref DomainName, ""]]
+        AssertDescription: AuthDomainName needs DomainName (its hosted zone and the parent name Cognito requires)
+      - Assert: !Not [!Equals [!Ref AuthCertificateArn, ""]]
+        AssertDescription: AuthDomainName needs AuthCertificateArn (an issued us-east-1 ACM certificate covering it)
   ExistingNetwork:
     RuleCondition: !Not [!Equals [!Ref ExistingVpcId, ""]]
     Assertions:
@@ -198,6 +221,7 @@ Rules:
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasAuthDomain: !Not [!Equals [!Ref AuthDomainName, ""]]
   HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   CreateEice: !Equals [!Ref ExistingEiceId, ""]
@@ -422,7 +446,7 @@ Resources:
               Setup: !If [MfaOn, "새 암호와 인증 앱(TOTP)을 등록해 주세요.", "새 암호를 정해 주세요."]
       Policies:
         PasswordPolicy:
-          MinimumLength: 12
+          MinimumLength: !Ref PasswordMinLength
           RequireLowercase: true
           RequireNumbers: true
           RequireUppercase: false
@@ -460,12 +484,38 @@ Resources:
       RefreshTokenValidity: !Ref SessionHours
       TokenValidityUnits: { IdToken: minutes, AccessToken: minutes, RefreshToken: hours }
 
+  # A custom domain needs its parent name (DnsA) to resolve.
+  ParentDnsReady:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Metadata:
+      Record: !If [HasDomain, !Ref DnsA, ""]
+
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
+    DependsOn: ParentDnsReady
     Properties:
       UserPoolId: !Ref UserPool
-      Domain: !Sub "${AWS::StackName}-${AWS::AccountId}"
+      Domain: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${AWS::StackName}-${AWS::AccountId}"]
+      CustomDomainConfig: !If [HasAuthDomain, { CertificateArn: !Ref AuthCertificateArn }, !Ref "AWS::NoValue"]
       ManagedLoginVersion: 2
+
+  AuthDnsA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasAuthDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AuthDomainName
+      Type: A
+      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
+
+  AuthDnsAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasAuthDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AuthDomainName
+      Type: AAAA
+      AliasTarget: { DNSName: !GetAtt UserPoolDomain.CloudFrontDistribution, HostedZoneId: Z2FDTNDATAQYW2 }
 
   ManagedLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
@@ -749,6 +799,11 @@ Resources:
             provider = "oidc"
             provider_display_name = "Cognito"
             oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${UserPool}"
+            # Explicit endpoints: discovery may report the old domain while it is replaced.
+            skip_oidc_discovery = true
+            login_url = "https://${CognitoHost}/oauth2/authorize"
+            redeem_url = "https://${CognitoHost}/oauth2/token"
+            oidc_jwks_url = "https://cognito-idp.$region.amazonaws.com/${UserPool}/.well-known/jwks.json"
             client_id = "$client_id"
             redirect_url = "$url/oauth2/callback"
             scope = "openid email profile"
@@ -886,7 +941,11 @@ Resources:
             log "done"
             signal SUCCESS "code-server ${CodeServerVersion}, oauth2-proxy ${OAuth2ProxyVersion} running"
           - VolumeSerial: !Join ["", !Split ["-", !Ref DataVolume]]   # nvme serial = volume id without the dash
-            CognitoHost: !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+            # Not from UserPoolDomain (it waits for DnsA, which waits for this instance).
+            CognitoHost: !If
+              - HasAuthDomain
+              - !Ref AuthDomainName
+              - !Sub "${AWS::StackName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com"
 
   # Create waits for the first boot and rolls back on a failed setup, with the failing line in the reason.
   BootWait:
@@ -1099,8 +1158,9 @@ Outputs:
   # Ends the oauth2-proxy session, then Cognito's, and returns to sign-in.
   LogoutUrl:
     Value: !Sub
-      - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
+      - "https://${Host}/oauth2/sign_out?rd=https%3A%2F%2F${AuthHost}%2Flogout%3Fclient_id%3D${UserPoolClient}%26logout_uri%3Dhttps%253A%252F%252F${Host}%252F"
       - Host: !If [HasDomain, !Ref DomainName, !GetAtt Distribution.DomainName]
+        AuthHost: !If [HasAuthDomain, !Ref AuthDomainName, !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"]
   InstanceId:
     Value: !Ref Instance
   InstancePrivateIp:

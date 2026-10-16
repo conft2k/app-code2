@@ -30,6 +30,10 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (a change restarts the instance)
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
   CODE2_MFA                    on|off TOTP at sign-in (default on)
+  CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
+  CODE2_AUTH_DOMAIN            custom name for the Cognito sign-in pages, e.g. auth.code.example.com (needs
+                               CODE2_DOMAIN; empty goes back to the prefix domain)
+  CODE2_AUTH_CERT_ARN          its certificate (default: an issued us-east-1 certificate covering it)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
   CODE2_BACKUP_COUNT           daily /home snapshots kept (default 7, 0 = off)
@@ -105,7 +109,7 @@ keep() { PARAMS=$(jq -c --arg k "$1" '. + [{ParameterKey: $k, UsePreviousValue: 
 # ParameterKey:ENV pairs that may change after create.
 TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVolumeSize:CODE2_ROOT_SIZE
   CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION
-  SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
+  SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, edge, the volume's source, the boot signal).
@@ -149,16 +153,29 @@ find_zone() {
   die "no Route 53 public hosted zone for $1 (set CODE2_ZONE or CODE2_ZONE_ID)"
 }
 
-# Certificate: CODE2_CERT_ARN, else an issued us-east-1 certificate whose names (SANs included) cover DOMAIN.
+# find_cert <domain> [arn]: the given ARN, else an issued us-east-1 certificate whose names (SANs included) cover it.
 find_cert() {
   local arn
-  if [ -n "${CODE2_CERT_ARN:-}" ]; then echo "$CODE2_CERT_ARN"; return; fi
+  if [ -n "${2:-}" ]; then echo "$2"; return; fi
   arn=$(aws acm list-certificates --region us-east-1 --certificate-statuses ISSUED \
       --includes keyTypes=RSA_2048,RSA_3072,RSA_4096,EC_prime256v1,EC_secp384r1 --output json \
     | jq -r --arg d "$1" --arg w "*.${1#*.}" \
       '[.CertificateSummaryList[] | select(((.SubjectAlternativeNameSummaries // []) + [.DomainName]) | any(. == $d or . == $w))][0].CertificateArn // empty')
-  [ -n "$arn" ] || die "no issued us-east-1 ACM certificate covers $1 (request one, or set CODE2_CERT_ARN)"
+  [ -n "$arn" ] || die "no issued us-east-1 ACM certificate covers $1 (request one, or pass its ARN)"
   echo "$arn"
+}
+
+# Cognito custom domain: CODE2_AUTH_DOMAIN may be set, changed or emptied at any time (the domain is replaced).
+auth_domain_params() {
+  local cert
+  if [ -n "${CODE2_AUTH_DOMAIN:-}" ]; then
+    cert=$(find_cert "$CODE2_AUTH_DOMAIN" "${CODE2_AUTH_CERT_ARN:-}")
+    param AuthDomainName "$CODE2_AUTH_DOMAIN"; param AuthCertificateArn "$cert"
+  elif is_set CODE2_AUTH_DOMAIN; then
+    param AuthDomainName ""; param AuthCertificateArn ""
+  elif [ "${1:-}" = keep ]; then
+    keep AuthDomainName; keep AuthCertificateArn
+  fi
 }
 
 preflight_create() {
@@ -215,8 +232,10 @@ params_create() {
   if [ -n "${CODE2_DOMAIN:-}" ]; then
     param DomainName "$CODE2_DOMAIN"
     zone=$(find_zone "$CODE2_DOMAIN"); param HostedZoneId "$zone"
-    cert=$(find_cert "$CODE2_DOMAIN"); param CertificateArn "$cert"
+    cert=$(find_cert "$CODE2_DOMAIN" "${CODE2_CERT_ARN:-}"); param CertificateArn "$cert"
   fi
+  [ -z "${CODE2_AUTH_DOMAIN:-}" ] || [ -n "${CODE2_DOMAIN:-}" ] || die "CODE2_AUTH_DOMAIN needs CODE2_DOMAIN"
+  auth_domain_params
   [ -z "${CODE2_RESTORE_SNAPSHOT:-}" ] || param DataSnapshotId "$CODE2_RESTORE_SNAPSHOT"
 
   for pair in $TUNABLES; do
@@ -242,6 +261,7 @@ params_update() {
     fi
   done
   if has OriginSlot; then keep OriginSlot; fi
+  if has AuthDomainName; then auth_domain_params keep; else auth_domain_params; fi
   for v in CODE2_DOMAIN CODE2_AZ CODE2_VPC_ID CODE2_SUBNET_ID CODE2_RESTORE_SNAPSHOT; do
     [ -z "${!v:-}" ] || warn "$v only applies when the stack is created; ignored"
   done
@@ -275,6 +295,7 @@ legacy_template() {
 make_change_set() {
   local status reason
   echo "$PARAMS" > "$TMP/params.json"
+  [ "$(wc -c < "$2")" -le 51200 ] || die "$2 is over 51,200 bytes, the limit for a template body"
   cs="$STACK-$(date -u +%Y%m%d-%H%M%S)-$RANDOM"
   aws cloudformation create-change-set --stack-name "$STACK" --change-set-name "$cs" --change-set-type "$1" \
     --template-body "file://$2" --capabilities CAPABILITY_IAM --tags Key=project,Value=code2 \
