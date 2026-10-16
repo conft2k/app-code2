@@ -17,7 +17,7 @@ Metadata:
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot]
       - Label: { default: Network (create-time) }
-        Parameters: [AvailabilityZone, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
+        Parameters: [AvailabilityZone, CloudFrontPrefixListId, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId,
                      ExistingEiceId, ExistingEiceSecurityGroupId]
       - Label: { default: Edge }
         Parameters: [DomainName, HostedZoneId, CertificateArn, PriceClass]
@@ -32,7 +32,13 @@ Parameters:
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
-    Description: CIDR of the new VPC, or of ExistingVpcId. Port 80 on the instance is open to it (CloudFront VPC origin ENIs).
+    Description: CIDR of the new VPC (ignored with ExistingVpcId)
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: "^pl-[0-9a-f]+$"
+    Description: >-
+      The region's com.amazonaws.global.cloudfront.origin-facing managed prefix list (deploy.sh looks it up). VPC origin
+      traffic reaches the instance from these addresses, so port 80 is open to them only.
   PublicSubnetCidr:
     Type: String
     Default: 10.42.0.0/24
@@ -314,15 +320,16 @@ Resources:
       Gateway: !If [CreateNetwork, !Ref GatewayAttachment, ""]
 
   # ---------- security groups ----------
-  # :80 is open to the VPC range because CloudFront's VPC origin ENIs (CloudFront-VPCOrigins-Service-SG) only
-  # appear after the origin exists. Nothing else this stack creates sends there: the EICE can only reach :22.
+  # CloudFront's VPC origin ENIs deliver requests from the origin-facing CloudFront addresses, not from their VPC IPs,
+  # so :80 allows that managed prefix list (a VPC CIDR rule drops the traffic and CloudFront answers 504).
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: code2 EC2 - oauth2-proxy :80 from CloudFront (VPC origin), SSH from the EICE
       VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref VpcCidr, Description: CloudFront VPC origin }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontPrefixListId,
+            Description: CloudFront VPC origin }
       SecurityGroupEgress:
         - { IpProtocol: "-1", CidrIp: 0.0.0.0/0, Description: "dev box: git, package registries, extensions (NAT)" }
       Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-ec2" }]

@@ -116,6 +116,15 @@ arch_of() { aws ec2 describe-instance-types --instance-types "$1" --query 'Insta
 latest_ami() { aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-$1" \
   --query Parameter.Value --output text; }
 
+# The instance's :80 accepts CloudFront's origin-facing addresses only (VPC origin traffic comes from them).
+prefix_list() {
+  local id
+  id=$(aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+    --query 'PrefixLists[0].PrefixListId' --output text)
+  [[ "$id" == pl-* ]] || die "no CloudFront origin-facing prefix list in $AWS_REGION"
+  echo "$id"
+}
+
 # Hosted zone: CODE2_ZONE_ID, else CODE2_ZONE, else the closest public zone that DOMAIN sits in.
 find_zone() {
   local name id
@@ -162,23 +171,23 @@ preflight_create() {
 }
 
 params_create() {
-  local type=${CODE2_INSTANCE_TYPE:-t4g.large} arch ami az="${CODE2_AZ:-}" pair k v vpc cidr eice zone cert
+  local type=${CODE2_INSTANCE_TYPE:-t4g.large} arch ami az="${CODE2_AZ:-}" pair k v vpc eice zone cert pl
   [ -n "${CODE2_ADMIN_EMAIL:-}" ] || die "set CODE2_ADMIN_EMAIL (the temporary password goes there)"
   arch=$(arch_of "$type"); [ -n "$arch" ] || die "unknown instance type $type in $AWS_REGION"
   ami=$(latest_ami "$arch"); param ImageId "$ami"
+  pl=$(prefix_list); param CloudFrontPrefixListId "$pl"
 
   if [ -n "${CODE2_VPC_ID:-}" ]; then
     vpc=$CODE2_VPC_ID
     [ -n "${CODE2_SUBNET_ID:-}" ] || die "CODE2_VPC_ID needs CODE2_SUBNET_ID (a private subnet with NAT egress)"
     read -r v az < <(aws ec2 describe-subnets --subnet-ids "$CODE2_SUBNET_ID" --query 'Subnets[0].[VpcId,AvailabilityZone]' --output text)
     [ "$v" = "$vpc" ] || die "$CODE2_SUBNET_ID is in $v, not $vpc"
-    cidr=$(aws ec2 describe-vpcs --vpc-ids "$vpc" --query 'Vpcs[0].CidrBlock' --output text)
     aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$vpc" --query 'InternetGateways[0].InternetGatewayId' \
       --output text | grep -q '^igw-' || die "$vpc has no internet gateway (CloudFront VPC origins need one)"
     aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$CODE2_SUBNET_ID" \
       --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId' --output text | grep -q '^nat-' \
       || warn "$CODE2_SUBNET_ID has no 0.0.0.0/0 route to a NAT gateway in its own route table; the instance needs internet egress"
-    param ExistingVpcId "$vpc"; param ExistingSubnetId "$CODE2_SUBNET_ID"; param VpcCidr "$cidr"
+    param ExistingVpcId "$vpc"; param ExistingSubnetId "$CODE2_SUBNET_ID"
     read -r eice v < <(aws ec2 describe-instance-connect-endpoints --filters "Name=vpc-id,Values=$vpc" \
       --query 'InstanceConnectEndpoints[0].[InstanceConnectEndpointId,SecurityGroupIds[0]]' --output text)
     if [[ "$eice" == eice-* ]]; then
@@ -208,7 +217,7 @@ params_create() {
 }
 
 params_update() {
-  local existing pair k v cur_type new_type cur_arch new_arch ami
+  local existing pair k v cur_type new_type cur_arch new_arch ami pl
   existing=" $(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].Parameters[].ParameterKey' --output text | tr '\t' ' ') "
   has() { [[ "$existing" == *" $1 "* ]]; }
 
@@ -216,6 +225,7 @@ params_update() {
     k=${pair%%:*} v=${pair#*:}
     if is_set "$v"; then param "$k" "${!v}"; elif has "$k"; then keep "$k"; fi
   done
+  pl=$(prefix_list); param CloudFrontPrefixListId "$pl"   # always current; older stacks lack it
   for k in $CREATE_ONLY; do
     if has "$k"; then keep "$k"
     elif [ "$k" = WaitForBoot ]; then param WaitForBoot false   # the running instance predates the boot signal
