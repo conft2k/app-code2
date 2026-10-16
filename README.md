@@ -49,46 +49,46 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 ### 전체 구성
 
 ```mermaid
-flowchart TB
+flowchart LR
   user(["🧑‍💻 브라우저"])
-  laptop(["💻 노트북<br/>ssh · VS Code Remote-SSH"])
+  laptop(["💻 노트북<br/>ssh · Remote-SSH"])
 
   subgraph aws["☁️ AWS 계정 · 리전"]
-    cf["CloudFront<br/>HTTPS · 캐시 없음<br/>*.cloudfront.net 또는 내 도메인"]
-    cognito["Cognito User Pool<br/>암호 + TOTP MFA"]
-    ssm["SSM Parameter Store<br/>client id · URL"]
+    cf["CloudFront<br/>HTTPS · 캐시 없음"]
 
     subgraph vpc["VPC 10.42.0.0/16 · AZ 1개"]
       subgraph pri["🔒 private subnet 10.42.1.0/24"]
         eice["EC2 Instance<br/>Connect Endpoint"]
-        subgraph ec2["EC2 · Graviton t4g.large · AL2023 arm64"]
+        subgraph ec2["EC2 · Graviton t4g.large"]
           proxy["oauth2-proxy<br/>:80"]
-          code["code-server<br/>127.0.0.1:8080<br/>ec2-user · sudo"]
+          code["code-server<br/>127.0.0.1:8080"]
           home[("/home<br/>EBS 50 GiB")]
         end
       end
       subgraph pub["public subnet 10.42.0.0/24"]
         nat["NAT Gateway"]
       end
-      s3ep["S3 gateway endpoint<br/>dnf 저장소"]
-      igw["Internet Gateway"]
+      igw["Internet<br/>Gateway"]
+      s3ep["S3 gateway<br/>endpoint"]
     end
+
+    cognito["Cognito<br/>암호 + TOTP"]
+    ssm["SSM Parameter<br/>Store"]
   end
 
-  internet(["🌐 인터넷<br/>GitHub · npm · PyPI · Open VSX"])
+  internet(["🌐 인터넷<br/>GitHub · npm · PyPI"])
 
   user -->|"① HTTPS"| cf
-  cf -->|"② VPC origin · http :80"| proxy
-  proxy -->|"③ 프록시 · WebSocket"| code
+  cf -->|"② VPC origin :80"| proxy
+  proxy -->|"③ 프록시 · WS"| code
   code --- home
-  user -.->|"로그인 · TOTP"| cognito
-  proxy -.->|"OIDC 토큰 검증"| cognito
-  laptop -->|"open-tunnel · IAM 인증"| eice
-  eice -->|"SSH tcp 22"| code
+  laptop -->|"IAM 인증 터널"| eice
+  eice -->|"SSH 22"| code
   code -->|"아웃바운드"| nat
   nat --> igw --> internet
   code -.-> s3ep
-  proxy -.->|"부팅 시 설정 읽기"| ssm
+  proxy -.->|"OIDC 로그인"| cognito
+  proxy -.->|"부팅 시 설정"| ssm
 
   classDef client fill:#F3F4F6,stroke:#6B7280,color:#111827
   classDef edge fill:#EDE4FF,stroke:#8C4FFF,color:#2E1065
