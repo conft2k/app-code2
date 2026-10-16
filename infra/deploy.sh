@@ -23,12 +23,13 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_STACK                  stack name, lowercase (default code2)
   CODE2_ACCOUNT                refuse to run with credentials for any other account
   AWS_REGION                   default: AWS_DEFAULT_REGION, the profile's region, then ap-northeast-2
-  CODE2_INSTANCE_TYPE          default t4g.medium; Graviton or x86 (another architecture replaces the instance)
+  CODE2_INSTANCE_TYPE          default t4g.medium; any Nitro type, Graviton or x86 (another architecture replaces the instance)
   CODE2_DATA_SIZE              /home GiB (default 50, grow only)
   CODE2_ROOT_SIZE              root GiB (default 30, a change replaces the instance)
   CODE2_CODE_SERVER_VERSION    code-server version (a change restarts the instance)
   CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (a change restarts the instance)
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
+  CODE2_MFA                    on|off TOTP at sign-in (default on)
   CODE2_AUTO_UPDATES           true|false daily security updates (default true)
   CODE2_IDLE_STOP_HOURS        stop after this many idle hours (default 0 = never)
   CODE2_BACKUP_COUNT           daily /home snapshots kept (default 7, 0 = off)
@@ -104,7 +105,7 @@ keep() { PARAMS=$(jq -c --arg k "$1" '. + [{ParameterKey: $k, UsePreviousValue: 
 # ParameterKey:ENV pairs that may change after create.
 TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVolumeSize:CODE2_ROOT_SIZE
   CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION
-  SessionHours:CODE2_SESSION_HOURS AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
+  SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
 # Fixed after create (network, edge, the volume's source, the boot signal).
@@ -113,6 +114,14 @@ CREATE_ONLY="AvailabilityZone VpcCidr PublicSubnetCidr PrivateSubnetCidr Existin
 
 arch_of() { aws ec2 describe-instance-types --instance-types "$1" --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures' \
   --output text 2>/dev/null | tr '\t' '\n' | grep -E '^(arm64|x86_64)$' | head -1 || true; }
+# The instance finds /home by its NVMe serial, which only Nitro (and bare metal) types expose; Xen types (t2, m4, c4)
+# would wait for the volume and fail.
+check_nitro() {
+  local hv metal
+  read -r hv metal < <(aws ec2 describe-instance-types --instance-types "$1" \
+    --query 'InstanceTypes[0].[Hypervisor,BareMetal]' --output text 2>/dev/null || echo "none False")
+  [ "$hv" = nitro ] || [ "$metal" = True ] || die "$1 is not a Nitro instance type (hypervisor $hv); code2 needs one, e.g. t4g, t3, m7g, m7i"
+}
 latest_ami() { aws ssm get-parameter --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-$1" \
   --query Parameter.Value --output text; }
 
@@ -174,6 +183,7 @@ params_create() {
   local type=${CODE2_INSTANCE_TYPE:-t4g.medium} arch ami az="${CODE2_AZ:-}" pair k v vpc eice zone cert pl
   [ -n "${CODE2_ADMIN_EMAIL:-}" ] || die "set CODE2_ADMIN_EMAIL (the temporary password goes there)"
   arch=$(arch_of "$type"); [ -n "$arch" ] || die "unknown instance type $type in $AWS_REGION"
+  check_nitro "$type"
   ami=$(latest_ami "$arch"); param ImageId "$ami"
   pl=$(prefix_list); param CloudFrontPrefixListId "$pl"
 
@@ -242,6 +252,7 @@ params_update() {
   new_type=${CODE2_INSTANCE_TYPE:-$cur_type}
   cur_arch=$(arch_of "$cur_type"); new_arch=$(arch_of "$new_type")
   [ -n "$new_arch" ] || die "unknown instance type $new_type in $AWS_REGION"
+  check_nitro "$new_type"
   if [ "${CODE2_UPDATE_AMI:-}" = 1 ] || [ "$cur_arch" != "$new_arch" ]; then
     [ "$cur_arch" = "$new_arch" ] || echo "$cur_type ($cur_arch) -> $new_type ($new_arch): the instance is replaced with a $new_arch AMI"
     ami=$(latest_ami "$new_arch"); param ImageId "$ami"
@@ -371,7 +382,7 @@ instance_state() { aws ec2 describe-instances --instance-ids "$INSTANCE" --query
 
 # ssm_run <command...>: runs commands as root on the instance, prints stdout, fails with the command.
 ssm_run() {
-  local id st=Pending
+  local id st=Pending deadline=$((SECONDS + 3700))   # executionTimeout below, plus delivery
   [ "$(instance_state)" = running ] || die "$INSTANCE is $(instance_state)"
   aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE" \
     --query 'InstanceInformationList[0].PingStatus' --output text | grep -q Online || die "$INSTANCE is not online in Systems Manager yet"
@@ -379,6 +390,7 @@ ssm_run() {
     --parameters "$(jq -nc '{commands: $ARGS.positional, executionTimeout: ["3600"]}' --args "$@")" \
     --query Command.CommandId --output text)
   while [[ "$st" =~ ^(Pending|InProgress|Delayed)$ ]]; do
+    [ "$SECONDS" -lt "$deadline" ] || die "command $id still $st after $((3700 / 60)) minutes"
     sleep 3
     st=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE" --query Status --output text 2>/dev/null || echo Pending)
   done
@@ -441,9 +453,10 @@ case "$1" in
     [ -z "$LOGOUT" ] || echo "logout:   $LOGOUT"
     state=$(instance_state)
     echo "instance: $INSTANCE ($IP) $state"
+    # Subshell: ssm_run dies (exits) when the instance is not in Systems Manager yet; status still ends normally.
     if [ "$state" = running ]; then
-      ssm_run "systemctl is-active code-server oauth2-proxy | paste -sd' '" "df -h /home | tail -1" \
-        "readlink -f /usr/local/bin/code-server /usr/local/bin/oauth2-proxy" || true
+      ( ssm_run "systemctl is-active code-server oauth2-proxy | paste -sd' '" "df -h /home | tail -1" \
+        "readlink -f /usr/local/bin/code-server /usr/local/bin/oauth2-proxy" ) || true
     fi ;;
   logs)
     load_outputs

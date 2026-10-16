@@ -10,7 +10,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Sign-in }
-        Parameters: [AdminUsername, AdminEmail, SessionHours]
+        Parameters: [AdminUsername, AdminEmail, Mfa, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
                      OAuth2ProxyVersion, AutoUpdates, IdleStopHours]
@@ -95,7 +95,8 @@ Parameters:
     Type: String
     Default: t4g.medium
     AllowedPattern: '^[a-z][a-z0-9-]*\.[a-z0-9]+$'
-    Description: Any type (Graviton or x86); ImageId must match its architecture
+    Description: >-
+      Any Nitro type, Graviton or x86 (the instance finds /home by its NVMe id); ImageId must match its architecture
   RootVolumeSize:
     Type: Number
     Default: 30
@@ -140,6 +141,13 @@ Parameters:
     MinValue: 1
     MaxValue: 168
     Description: How long a sign-in lasts (Cognito refresh token and the oauth2-proxy cookie)
+  Mfa:
+    Type: String
+    Default: "on"
+    AllowedValues: ["on", "off"]
+    Description: >-
+      on: every user sets up TOTP on first sign-in and enters a code each time. off: password only. Cognito's
+      OPTIONAL mode is left out because managed login never offers TOTP setup in it.
   BackupRetainCount:
     Type: Number
     Default: 7
@@ -202,14 +210,19 @@ Conditions:
   HasAz: !Not [!Equals [!Ref AvailabilityZone, ""]]
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
   CreateEice: !Equals [!Ref ExistingEiceId, ""]
+  UseExistingEice: !Not [!Equals [!Ref ExistingEiceId, ""]]
+  MfaOn: !Equals [!Ref Mfa, "on"]
   HasSnapshot: !Not [!Equals [!Ref DataSnapshotId, ""]]
   HasBackup: !Not [!Equals [!Ref BackupRetainCount, 0]]
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
   WaitsForBoot: !Equals [!Ref WaitForBoot, "true"]
   OriginSlotA: !Equals [!Ref OriginSlot, a]
   OriginSlotB: !Equals [!Ref OriginSlot, b]
-  # T families (t3, t3a, t4g) are the burstable ones: "t4g" split on "t" starts with an empty string.
-  IsBurstable: !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
+  # T families (t2, t3, t3a, t4g) are the burstable ones: "t4g" split on "t" starts with an empty string. Trainium
+  # (trn1, trn2) starts with "t" too but takes no CPU credit setting.
+  IsBurstable: !And
+    - !Equals [!Select [0, !Split [t, !Select [0, !Split [".", !Ref InstanceType]]]], ""]
+    - !Not [!Equals [!Select [0, !Split [tr, !Select [0, !Split [".", !Ref InstanceType]]]], ""]]
 
 Resources:
   # ---------- network (skipped with ExistingVpcId) ----------
@@ -367,6 +380,20 @@ Resources:
       SourceSecurityGroupId: !If [CreateEice, !Ref EiceSecurityGroup, !Ref ExistingEiceSecurityGroupId]
       Description: EC2 Instance Connect Endpoint
 
+  # An existing EICE's security group may allow egress to listed groups only; this adds the instance to them.
+  EiceSshToInstance:
+    Type: AWS::EC2::SecurityGroupEgress
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [W1030] } }   # Existing* defaults are ""; Rules require real ids
+    Condition: UseExistingEice
+    Properties:
+      GroupId: !Ref ExistingEiceSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      DestinationSecurityGroupId: !Ref InstanceSecurityGroup
+      Description: !Sub "SSH to the ${AWS::StackName} code2 instance"
+
   InstanceConnectEndpoint:
     Type: AWS::EC2::InstanceConnectEndpoint
     Metadata:
@@ -390,26 +417,21 @@ Resources:
       AliasAttributes: [email]
       AutoVerifiedAttributes: [email]
       UsernameConfiguration: { CaseSensitive: false }
-      # A shell with sudo sits behind this login: TOTP is required, set up on first sign-in.
-      MfaConfiguration: "ON"
-      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      # A shell with sudo sits behind this login: TOTP is on unless Mfa=off, set up on first sign-in.
+      MfaConfiguration: !If [MfaOn, "ON", "OFF"]
+      EnabledMfas: !If [MfaOn, [SOFTWARE_TOKEN_MFA], !Ref "AWS::NoValue"]
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
           EmailSubject: "[code2] VS Code 계정이 만들어졌습니다"
           # Without a custom domain the URL is only known after the distribution exists: deploy.sh status shows it.
-          EmailMessage: !If
-            - HasDomain
-            - !Sub >-
-              code2 (VS Code) 계정입니다.<br><br>
-              사용자 이름: {username}<br>임시 암호: {####}<br><br>
-              https://${DomainName} 에 접속해 위 정보로 로그인한 뒤 새 암호와 인증 앱(TOTP)을 등록해 주세요.
-              임시 암호는 7일 동안 쓸 수 있습니다.
+          EmailMessage: !Sub
             - >-
               code2 (VS Code) 계정입니다.<br><br>
               사용자 이름: {username}<br>임시 암호: {####}<br><br>
-              code2 주소(infra/deploy.sh status 의 url)에 접속해 위 정보로 로그인한 뒤 새 암호와 인증 앱(TOTP)을
-              등록해 주세요. 임시 암호는 7일 동안 쓸 수 있습니다.
+              ${Where}에 접속해 위 정보로 로그인한 뒤 ${Setup} 임시 암호는 7일 동안 쓸 수 있습니다.
+            - Where: !If [HasDomain, !Sub "https://${DomainName} ", "code2 주소(infra/deploy.sh status 의 url)"]
+              Setup: !If [MfaOn, "새 암호와 인증 앱(TOTP)을 등록해 주세요.", "새 암호를 정해 주세요."]
       Policies:
         PasswordPolicy:
           MinimumLength: 12
