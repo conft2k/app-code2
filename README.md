@@ -18,7 +18,7 @@ CloudFront → private EC2(Graviton) → code-server, Cognito 로그인(기본 M
 필요한 것: AWS 계정, AWS CLI v2, `jq`, 관리자 수준 자격 증명(VPC, EC2, IAM, CloudFront, Cognito, SSM, CloudWatch, DLM을 만듭니다). SSH와 Session Manager를 쓰려면 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)도 설치합니다.
 
 ```bash
-git clone https://github.com/conft2k/code2.git && cd code2
+git clone https://github.com/conft2k/app-code2.git && cd app-code2
 
 export AWS_REGION=ap-northeast-2              # 원하는 리전
 export CODE2_ADMIN_EMAIL=you@example.com      # 임시 암호를 받을 메일
