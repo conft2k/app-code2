@@ -816,6 +816,10 @@ Resources:
             cookie_samesite = "lax"
             cookie_expire = "${SessionHours}h"
             cookie_refresh = "30m"
+            # One CSRF cookie per sign-in, so a background request (service worker, favicon) that starts
+            # another sign-in cannot replace the PKCE verifier and fail the callback with invalid_grant.
+            cookie_csrf_per_request = true
+            cookie_csrf_expire = "15m"
             silence_ping_logging = true
             CFG
             # Secrets stay out of the log; the cookie key is kept across reboots.
