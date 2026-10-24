@@ -784,7 +784,8 @@ Resources:
             td_restart=
             [ "$(readlink -f /usr/local/bin/ttyd)" = "$td/ttyd" ] || td_restart=1
             ln -sfn "$td/ttyd" /usr/local/bin/ttyd
-            # -H: only requests carrying oauth2-proxy's user header; tmux keeps the session across reloads.
+            # Loopback only, like code-server; no -H: ttyd 1.7.7 copies that header into 30 bytes and
+            # Cognito's sub (36) fails, refusing every WebSocket. tmux keeps the session across reloads.
             put /etc/systemd/system/ttyd.service 644 <<'UNIT' && td_restart=1 || true
             [Unit]
             Description=ttyd terminal for ec2-user at /admin/
@@ -795,7 +796,7 @@ Resources:
             User=ec2-user
             WorkingDirectory=/home/ec2-user
             Environment=HOME=/home/ec2-user
-            ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -b /admin -W -H X-Forwarded-User tmux new -A -s admin
+            ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -b /admin -W tmux new -A -s admin
             Restart=always
             RestartSec=2
 
@@ -833,7 +834,8 @@ Resources:
             url=$(jq -r .url <<<"$conf")
             put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
             http_address = "0.0.0.0:80"
-            upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7681/admin/"]
+            # "/admin/" matches the prefix; "/admin" alone matches only itself and ttyd redirects it to /admin/
+            upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7681/admin/", "http://127.0.0.1:7681/admin"]
             provider = "oidc"
             provider_display_name = "Cognito"
             oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${UserPool}"
