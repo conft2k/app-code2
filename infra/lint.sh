@@ -3,7 +3,7 @@
 # CloudFormation ${...} references replaced by placeholders). Needs cfn-lint (pip) and shellcheck.
 set -euo pipefail
 cd "$(dirname "$0")"
-cfn-lint code2.yaml
+cfn-lint --non-zero-exit-code error code2.yaml   # warnings are printed but do not stop the other checks
 # CloudFormation takes a template body of at most 51,200 bytes.
 size=$(wc -c < code2.yaml)
 [ "$size" -le 51200 ] || { echo "code2.yaml is $size bytes; the template body limit is 51,200" >&2; exit 1; }
