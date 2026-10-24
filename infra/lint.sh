@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static checks: cfn-lint on the template, shellcheck on deploy.sh and on the instance user data (its
+# Static checks: cfn-lint on the template, shellcheck on deploy.sh, setup.sh and the user data bootstrap (its
 # CloudFormation ${...} references replaced by placeholders). Needs cfn-lint (pip) and shellcheck.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -7,7 +7,7 @@ cfn-lint --non-zero-exit-code error code2.yaml   # warnings are printed but do n
 # CloudFormation takes a template body of at most 51,200 bytes.
 size=$(wc -c < code2.yaml)
 [ "$size" -le 51200 ] || { echo "code2.yaml is $size bytes; the template body limit is 51,200" >&2; exit 1; }
-shellcheck --severity=warning deploy.sh lint.sh
+shellcheck --severity=warning deploy.sh lint.sh setup.sh
 python3 - code2.yaml > "${TMPDIR:-/tmp}/code2-userdata.sh" <<'PY'
 import re, sys, yaml
 
@@ -23,7 +23,7 @@ def tag(loader, suffix, node):
 
 Loader.add_multi_constructor("!", tag)
 doc = yaml.load(open(sys.argv[1]), Loader=Loader)
-script = doc["Resources"]["Instance"]["Properties"]["UserData"]["Fn::Base64"]["Sub"][0]
+script = doc["Resources"]["Instance"]["Properties"]["UserData"]["Fn::Base64"]["Sub"]
 script = script.replace("${!", "\0")
 script = re.sub(r"\$\{[A-Za-z0-9:]+\}", "CFN_VALUE", script)
 print(script.replace("\0", "${"), end="")

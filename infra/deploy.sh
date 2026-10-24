@@ -10,7 +10,7 @@ infra/deploy.sh <command>
   stack apply         execute the change set made by the last plan
   status              URL, instance state, services, /home usage
   logs [-f] [since]   setup log from CloudWatch Logs (default since 1h)
-  reconfigure         run the current user data on the instance again (no restart)
+  reconfigure         upload infra/setup.sh and run it on the instance (no restart; apply does this too)
   ssh [args]          SSH as ec2-user through the stack's EICE (one-off key via EC2 Instance Connect)
   ssh-config          ~/.ssh/config block for ssh / VS Code Remote-SSH (keys must be pushed per use)
   shell               Session Manager shell on the instance
@@ -26,9 +26,9 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_INSTANCE_TYPE          default t4g.medium; any Nitro type, Graviton or x86 (another architecture replaces the instance)
   CODE2_DATA_SIZE              /home GiB (default 50, grow only)
   CODE2_ROOT_SIZE              root GiB (default 30, a change replaces the instance)
-  CODE2_CODE_SERVER_VERSION    code-server version (a change restarts the instance)
-  CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (a change restarts the instance)
-  CODE2_TTYD_VERSION           ttyd version, the terminal at /admin/ (a change restarts the instance)
+  CODE2_CODE_SERVER_VERSION    code-server version (installed in place, no restart)
+  CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (installed in place, no restart)
+  CODE2_TTYD_VERSION           ttyd version, the terminal at /admin/ (installed in place, no restart)
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
   CODE2_MFA                    on|off TOTP at sign-in (default on)
   CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
@@ -65,6 +65,7 @@ region=${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/nul
 export AWS_REGION=${region:-ap-northeast-2}
 STACK=${CODE2_STACK:-code2}
 TEMPLATE=$(cd "$(dirname "$0")" && pwd)/code2.yaml
+SETUP=$(dirname "$TEMPLATE")/setup.sh
 
 caller=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo none)
 [ "$caller" != none ] || die "no AWS credentials: sign in first (aws login, aws sso login, or AWS_PROFILE=...)"
@@ -77,6 +78,34 @@ trap 'rm -rf "$TMP"' EXIT
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 is_set() { declare -p "$1" >/dev/null 2>&1; }
+
+# The instance runs setup.sh from here (<bucket>/<stack>/setup.sh); one bucket per account and region.
+BUCKET="code2-setup-$caller-$AWS_REGION"
+ensure_bucket() {
+  # Every call names the owner: the name is predictable, and another account's bucket must never be used.
+  aws s3api head-bucket --bucket "$BUCKET" --expected-bucket-owner "$caller" >/dev/null 2>&1 && return
+  echo "creating s3://$BUCKET for setup.sh"
+  local loc=(--create-bucket-configuration "LocationConstraint=$AWS_REGION")
+  [ "$AWS_REGION" != us-east-1 ] || loc=()
+  aws s3api create-bucket --bucket "$BUCKET" ${loc[@]+"${loc[@]}"} >/dev/null \
+    || die "cannot create s3://$BUCKET (if another account owns that name, this account cannot use it)"
+  aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(jq -nc --arg b "$BUCKET" '{Version: "2012-10-17", Statement: [{
+    Sid: "TlsOnly", Effect: "Deny", Principal: "*", Action: "s3:*", Resource: ["arn:aws:s3:::\($b)", "arn:aws:s3:::\($b)/*"],
+    Condition: {Bool: {"aws:SecureTransport": "false"}}}]}')"
+}
+# upload_setup keeps the replaced copy in $TMP/prev-setup.sh, so a failed apply can put it back (restore_setup).
+upload_setup() {
+  ensure_bucket
+  aws s3 cp --quiet --expected-bucket-owner "$caller" "s3://$BUCKET/$STACK/setup.sh" "$TMP/prev-setup.sh" 2>/dev/null || true
+  aws s3 cp --quiet --expected-bucket-owner "$caller" "$SETUP" "s3://$BUCKET/$STACK/setup.sh"
+}
+restore_setup() {
+  [ -f "$TMP/prev-setup.sh" ] || return 0
+  echo "putting the previous setup.sh back (the stack's settings rolled back)"
+  aws s3 cp --quiet --expected-bucket-owner "$caller" "$TMP/prev-setup.sh" "s3://$BUCKET/$STACK/setup.sh" || true
+}
 
 # ---------- stack state ----------
 stack_status() { aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE; }
@@ -204,6 +233,7 @@ params_create() {
   check_nitro "$type"
   ami=$(latest_ami "$arch"); param ImageId "$ami"
   pl=$(prefix_list); param CloudFrontPrefixListId "$pl"
+  param SetupBucket "$BUCKET"
 
   if [ -n "${CODE2_VPC_ID:-}" ]; then
     vpc=$CODE2_VPC_ID
@@ -256,6 +286,7 @@ params_update() {
     if is_set "$v"; then param "$k" "${!v}"; elif has "$k"; then keep "$k"; fi
   done
   pl=$(prefix_list); param CloudFrontPrefixListId "$pl"   # always current; older stacks lack it
+  param SetupBucket "$BUCKET"
   for k in $CREATE_ONLY; do
     if has "$k"; then keep "$k"
     elif [ "$k" = WaitForBoot ]; then param WaitForBoot false   # the running instance predates the boot signal
@@ -300,7 +331,7 @@ make_change_set() {
   cs="$STACK-$(date -u +%Y%m%d-%H%M%S)-$RANDOM"
   aws cloudformation create-change-set --stack-name "$STACK" --change-set-name "$cs" --change-set-type "$1" \
     --template-body "file://$2" --capabilities CAPABILITY_IAM --tags Key=project,Value=code2 \
-    --parameters "file://$TMP/params.json" --description "code2 $3 sha256=$(sha256 "$2")" \
+    --parameters "file://$TMP/params.json" --description "code2 $3 sha256=$(sha256 "$2") setup=$(sha256 "$SETUP")" \
     --query Id --output text >/dev/null
   aws cloudformation wait change-set-create-complete --stack-name "$STACK" --change-set-name "$cs" 2>/dev/null || true
   read -r status reason < <(aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$cs" \
@@ -346,7 +377,7 @@ plan() {
     params_create
   fi
 
-  make_change_set "$type" "$template" "$kind" || { echo "no changes"; return 0; }
+  make_change_set "$type" "$template" "$kind" || { echo "no stack changes (infra/deploy.sh reconfigure applies infra/setup.sh)"; return 0; }
 
   # A VPC origin in use cannot move to another instance: when the instance is recreated, plan again with the other
   # origin slot, so CloudFormation makes a new origin, moves the distribution and deletes the old one.
@@ -364,9 +395,6 @@ plan() {
   echo "change set $cs ($type $STACK):"
   aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$cs" \
     --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' --output table
-  if [ "$kind" = main ] && [ "$type" = UPDATE ] && has_resource DataVolumeAttachment; then
-    echo "after apply, run infra/deploy.sh reconfigure once: the running instance still has the old setup"
-  fi
   echo "apply it with: infra/deploy.sh stack apply"
 }
 
@@ -376,21 +404,43 @@ apply() {
     '[.Summaries[] | select(.Status == "CREATE_COMPLETE" and .ExecutionStatus == "AVAILABLE")] | sort_by(.CreationTime) | last
      | select(.) | [.ChangeSetName, (.Description // "")] | @tsv') || true
   [ -n "${cs:-}" ] || die "no pending change set for $STACK; run plan first"
-  # A plan of an older template must not be applied over a newer checkout.
-  if [[ "$desc" == "code2 main sha256="* ]] && [ "${desc#*sha256=}" != "$(sha256 "$TEMPLATE")" ]; then
-    die "infra/code2.yaml changed after $cs was planned; run plan again"
+  # A plan of an older template or setup.sh must not be applied over a newer checkout.
+  if [[ "$desc" == "code2 main sha256="* ]] && [ "${desc#*sha256=}" != "$(sha256 "$TEMPLATE") setup=$(sha256 "$SETUP")" ]; then
+    die "infra/code2.yaml or infra/setup.sh changed after $cs was planned; run plan again"
   fi
   type=$( [ "$(stack_status)" = REVIEW_IN_PROGRESS ] && echo create || echo update )
   [ "${CODE2_KEEP_ON_FAILURE:-}" != 1 ] || rollback=(--disable-rollback)
+  [[ "$desc" == "code2 migrate"* ]] || upload_setup   # a new or restarted instance runs it at boot
   echo "executing $cs"
   aws cloudformation execute-change-set --stack-name "$STACK" --change-set-name "$cs" ${rollback[@]+"${rollback[@]}"}
   if ! aws cloudformation wait "stack-$type-complete" --stack-name "$STACK"; then
     aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 30 \
       --query 'StackEvents[?contains(ResourceStatus,`FAILED`)].[LogicalResourceId,ResourceStatusReason]' --output table
+    [[ "$desc" == "code2 migrate"* ]] || restore_setup
     die "$STACK: $(stack_status)"
   fi
   echo "$STACK: $(stack_status)"
-  if [[ "$desc" == "code2 migrate"* ]]; then echo "now run infra/deploy.sh stack plan again for step 2"; fi
+  if [[ "$desc" == "code2 migrate"* ]]; then echo "now run infra/deploy.sh stack plan again for step 2"; return; fi
+  # Settings changes reach a running instance here. A new or restarted one runs setup.sh at boot too; setup.sh
+  # takes a lock, so this run waits for that one and then finds little to change.
+  [ "$type" = update ] || return 0
+  load_outputs
+  if [ "$(instance_state)" != running ]; then echo "$INSTANCE is $(instance_state): setup.sh runs when it starts"; return; fi
+  # Subshell: ssm_run exits when the instance is not in Systems Manager yet (it then runs setup.sh at boot). Not in
+  # an if or ||, which would turn off set -e inside it.
+  local rc=0
+  set +e; ( set -e; reconfigure ); rc=$?; set -e
+  [ "$rc" = 0 ] || warn "setup.sh did not run now; if the instance was restarting it runs at boot (check with infra/deploy.sh logs)"
+}
+
+# Runs the user data on the instance: the bootstrap, which fetches setup.sh and runs it (an older stack's user data
+# is the whole setup). Services restart only if their setup changed.
+reconfigure() {
+  echo "running setup.sh on $INSTANCE (no restart; services restart only if their setup changed)"
+  ssm_run 't=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")' \
+    'curl -fsS -H "X-aws-ec2-metadata-token: $t" http://169.254.169.254/latest/user-data > /run/code2-userdata' \
+    'bash /run/code2-userdata > /dev/null 2>&1 || { tail -n 30 /var/log/code2-setup.log; exit 1; }' \
+    'tail -n 5 /var/log/code2-setup.log'
 }
 
 # ---------- instance helpers ----------
@@ -412,7 +462,8 @@ ssm_run() {
     --query 'InstanceInformationList[0].PingStatus' --output text | grep -q Online || die "$INSTANCE is not online in Systems Manager yet"
   id=$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
     --parameters "$(jq -nc '{commands: $ARGS.positional, executionTimeout: ["3600"]}' --args "$@")" \
-    --query Command.CommandId --output text)
+    --query Command.CommandId --output text) || die "send-command to $INSTANCE failed"
+  [ -n "$id" ] || die "send-command to $INSTANCE returned no command id"
   while [[ "$st" =~ ^(Pending|InProgress|Delayed)$ ]]; do
     [ "$SECONDS" -lt "$deadline" ] || die "command $id still $st after $((3700 / 60)) minutes"
     sleep 3
@@ -450,6 +501,11 @@ destroy() {
     aws cloudformation describe-stack-events --stack-name "$STACK" --max-items 20 \
       --query 'StackEvents[?contains(ResourceStatus,`FAILED`)].[LogicalResourceId,ResourceStatusReason]' --output table
     die "delete did not finish; a CloudFront-VPCOrigins-Service-SG that lingers in the VPC clears after a while: run destroy again"
+  fi
+  aws s3 rm --quiet --expected-bucket-owner "$caller" "s3://$BUCKET/$STACK/setup.sh" 2>/dev/null || true
+  if [ "$(aws s3api list-objects-v2 --bucket "$BUCKET" --expected-bucket-owner "$caller" --max-items 1 \
+      --query 'length(Contents || `[]`)' --output text 2>/dev/null)" = 0 ]; then
+    aws s3api delete-bucket --bucket "$BUCKET" --expected-bucket-owner "$caller" 2>/dev/null || true
   fi
   echo "$STACK deleted. Left behind on purpose:"
   if [ -n "$pool" ] && [ "$pool" != None ]; then
@@ -489,13 +545,7 @@ case "$1" in
     follow=(); since=1h
     for a in "${@:2}"; do if [ "$a" = -f ]; then follow=(--follow); else since=$a; fi; done
     aws logs tail "$LOG_GROUP" --since "$since" ${follow[@]+"${follow[@]}"} ;;
-  reconfigure)
-    load_outputs
-    echo "running the current user data on $INSTANCE (no restart; services restart only if their setup changed)"
-    ssm_run 't=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")' \
-      'curl -fsS -H "X-aws-ec2-metadata-token: $t" http://169.254.169.254/latest/user-data > /run/code2-userdata' \
-      'bash /run/code2-userdata > /dev/null 2>&1 || { tail -n 30 /var/log/code2-setup.log; exit 1; }' \
-      'tail -n 5 /var/log/code2-setup.log' ;;
+  reconfigure) load_outputs; upload_setup; reconfigure ;;
   ssh) shift; ssh_instance "$@" ;;
   ssh-config)
     load_outputs

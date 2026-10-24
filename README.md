@@ -48,7 +48,7 @@ infra/deploy.sh status         # URL 확인, 서비스가 active active 이면 �
 
 도메인은 처음 만들 때 정합니다. 나중에 바꾸면 Cognito 콜백 주소와 인스턴스 설정이 어긋나므로, 스택을 새로 만드는 편이 안전합니다.
 
-Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기본은 `<스택>-<계정>.auth.<리전>.amazoncognito.com`). `CODE2_AUTH_DOMAIN=auth.code.example.com`처럼 `CODE2_DOMAIN` 아래 이름을 지정하면, 스크립트가 그 이름을 덮는 us-east-1 인증서(`CODE2_AUTH_CERT_ARN`로 지정 가능)를 찾아 넣고 A/AAAA 레코드를 만듭니다. Cognito는 상위 이름(`code.example.com`)의 A 레코드가 있어야 커스텀 도메인을 만들 수 있어서, 사이트 레코드가 생긴 뒤에 만들어집니다. 생성 후에도 켜고 끌 수 있습니다(도메인이 교체되고 인스턴스는 중지 후 시작되며, 그동안 로그인이 잠시 안 될 수 있습니다).
+Cognito 로그인 페이지도 내 도메인으로 바꿀 수 있습니다(기본은 `<스택>-<계정>.auth.<리전>.amazoncognito.com`). `CODE2_AUTH_DOMAIN=auth.code.example.com`처럼 `CODE2_DOMAIN` 아래 이름을 지정하면, 스크립트가 그 이름을 덮는 us-east-1 인증서(`CODE2_AUTH_CERT_ARN`로 지정 가능)를 찾아 넣고 A/AAAA 레코드를 만듭니다. Cognito는 상위 이름(`code.example.com`)의 A 레코드가 있어야 커스텀 도메인을 만들 수 있어서, 사이트 레코드가 생긴 뒤에 만들어집니다. 생성 후에도 켜고 끌 수 있습니다(도메인이 교체되고 인스턴스 재시작 없이 oauth2-proxy만 다시 시작되며, 그동안 로그인이 잠시 안 될 수 있습니다).
 
 ### 이미 있는 VPC 쓰기 (선택)
 
@@ -72,7 +72,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
   <img src="docs/architecture.png" alt="code2 아키텍처: 브라우저 → CloudFront → VPC origin → private subnet의 EC2(oauth2-proxy → code-server, /home EBS). Cognito 로그인, SSM으로 부팅 설정, EC2 Instance Connect Endpoint로 SSH, NAT Gateway로 아웃바운드" width="100%">
 </p>
 
-실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소 같은 S3 트래픽은 그림에 없는 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 그림에 없는 CloudWatch(로그·지표·알람)와 Data Lifecycle Manager(일일 스냅샷)도 함께 만들어집니다.
+실선은 데이터가 지나는 경로이고, 점선은 인증·설정 같은 제어 경로입니다. 바깥에서 들어오는 길은 CloudFront와 EC2 Instance Connect Endpoint 두 곳뿐이고, 인스턴스에는 공인 IP가 없습니다. dnf 저장소 같은 S3 트래픽은 그림에 없는 S3 게이트웨이 엔드포인트로 NAT를 거치지 않고 나갑니다. 그림에 없는 CloudWatch(로그·지표·알람)와 Data Lifecycle Manager(일일 스냅샷)도 함께 만들어집니다. 설정 스크립트를 두는 S3 버킷 `code2-setup-<계정>-<리전>`은 스택 밖에서 `deploy.sh`가 만듭니다.
 
 ### 브라우저 접속 흐름
 
@@ -89,7 +89,9 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 - CloudFront 배포는 인스턴스를 가리키므로, 인스턴스가 먼저 만들어지고 CloudFront 주소와 Cognito 클라이언트는 그 뒤에 정해집니다. 그래서 스택이 이 두 값을 SSM 파라미터 `/<스택 이름>/oauth2-proxy`에 써 두고, 인스턴스는 이 값이 나타날 때까지(최대 30분) 기다렸다가 oauth2-proxy를 설정합니다. code-server는 그 전에 먼저 켜집니다.
 - `/home` 볼륨은 인스턴스가 부팅할 때 **직접** 붙입니다(인스턴스 역할은 이 볼륨을, 이 인스턴스 프로필로 시작한 인스턴스에만 붙일 수 있습니다). 덕분에 인스턴스가 교체되어도 새 인스턴스가 옛 인스턴스가 종료되기를 기다렸다가 볼륨을 이어받습니다.
 - 처음 만들 때는 설정이 끝나면 인스턴스가 CloudFormation `BootWait`에 성공/실패를 알립니다.
-- 설정 스크립트(user data)는 여러 번 실행해도 결과가 같게 짜여 있고, **부팅할 때마다 현재 user data를 다시 실행**합니다. 그래서 버전이나 설정을 바꾼 템플릿이 적용되면(인스턴스가 중지 후 시작됨) 새 설정이 자동으로 들어갑니다. 바뀐 것이 있는 서비스만 재시작합니다.
+- 설정 스크립트는 user data가 아니라 `infra/setup.sh`에 있습니다. user data는 S3(`code2-setup-<계정>-<리전>/<스택>/setup.sh`)에서 이 스크립트를 받아 실행하는 몇 줄짜리 부트스트랩이라 스택이 살아 있는 동안 바뀌지 않고, 그래서 설정을 바꿔도 인스턴스가 재시작되지 않습니다.
+- 버전 같은 설정은 SSM 파라미터 `/<스택 이름>/setup`에 들어가고, 스크립트는 실행할 때마다 이 값을 읽습니다. `stack apply`는 `setup.sh`를 S3에 올리고 스택을 바꾼 뒤, 실행 중인 인스턴스에서 스크립트를 SSM으로 다시 실행합니다. `setup.sh`만 바꿨을 때는 `reconfigure`로 바로 적용합니다.
+- 스크립트는 여러 번 실행해도 결과가 같게 짜여 있고 부팅할 때마다 다시 실행되므로, 교체되거나 재시작된 인스턴스에도 저장소의 설정이 그대로 들어갑니다. 바뀐 것이 있는 서비스만 재시작합니다. 손으로 고친 설정은 다음 실행 때 덮어쓰이므로, 바꿀 것은 `setup.sh`에 넣습니다.
 - 설정 로그는 `/var/log/code2-setup.log`에 쌓이고, CloudWatch Logs `/code2/<스택 이름>`으로도 보냅니다(`infra/deploy.sh logs`). 비밀값은 로그에 남지 않습니다.
 
 ### SSH 접속 흐름
@@ -159,10 +161,10 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | 명령 | 하는 일 |
 |---|---|
 | `infra/deploy.sh stack plan` | 변경 세트를 만들고 변경 내용만 보여 줍니다. 아무것도 바꾸지 않습니다 |
-| `infra/deploy.sh stack apply` | 가장 최근 변경 세트를 실행합니다. plan 이후 템플릿이 바뀌었으면 실행하지 않습니다 |
+| `infra/deploy.sh stack apply` | `setup.sh`를 S3에 올리고 가장 최근 변경 세트를 실행한 뒤, 인스턴스에서 `setup.sh`를 다시 실행합니다. plan 이후 템플릿이나 `setup.sh`가 바뀌었으면 실행하지 않습니다 |
 | `infra/deploy.sh status` | URL, 로그아웃 주소, 인스턴스 상태, 서비스 상태, `/home` 사용량, 설치된 버전을 보여 줍니다 |
 | `infra/deploy.sh logs [-f] [기간]` | CloudWatch Logs의 설정 로그를 봅니다(기본 최근 1시간, 예: `logs 1d`, `logs -f`) |
-| `infra/deploy.sh reconfigure` | 재시작 없이 현재 user data를 인스턴스에서 다시 실행합니다 |
+| `infra/deploy.sh reconfigure` | `setup.sh`를 S3에 올리고 재시작 없이 인스턴스에서 실행합니다(스택 변경 없이 `setup.sh`만 바꿨을 때) |
 | `infra/deploy.sh ssh [명령]` | EICE를 거쳐 `ec2-user`로 SSH 접속합니다 |
 | `infra/deploy.sh ssh-config` | `~/.ssh/config`용 블록을 출력합니다 |
 | `infra/deploy.sh shell` | Session Manager 셸을 엽니다 |
@@ -181,7 +183,7 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 | `CODE2_INSTANCE_TYPE` | `t4g.medium` | 언제든 | 같은 아키텍처면 중지 후 시작, 아키텍처가 다르면 인스턴스 교체 |
 | `CODE2_DATA_SIZE` | `50` | 늘리기만 | `/home` GiB. 늘리면 다음 설정 실행 때 파일시스템도 늘립니다 |
 | `CODE2_ROOT_SIZE` | `30` | 언제든 | `/` GiB. 바꾸면 인스턴스 교체 |
-| `CODE2_CODE_SERVER_VERSION` / `CODE2_OAUTH2_PROXY_VERSION` | `4.139.1` / `7.15.5` | 언제든 | 바꾸면 인스턴스가 중지 후 시작되며 새 버전을 설치합니다 |
+| `CODE2_CODE_SERVER_VERSION` / `CODE2_OAUTH2_PROXY_VERSION` | `4.139.1` / `7.15.5` | 언제든 | 재시작 없이 새 버전을 설치하고 그 서비스만 재시작합니다 |
 | `CODE2_SESSION_HOURS` | `12` | 언제든 | 로그인 유지 시간(1–168) |
 | `CODE2_MFA` | `on` | 언제든 | `on`: 첫 로그인 때 TOTP를 등록하고 매번 코드를 입력합니다. `off`: 암호만. 나중에 `on`으로 바꾸면 사용자는 다음 로그인 때 TOTP를 등록합니다. Cognito의 OPTIONAL은 관리형 로그인이 TOTP 등록 화면을 띄우지 않아 넣지 않았습니다 |
 | `CODE2_AUTO_UPDATES` | `true` | 언제든 | 매일 보안 업데이트 |
@@ -203,13 +205,13 @@ GitHub에는 인스턴스에서 `ssh-keygen -t ed25519`로 키를 만든 뒤 계
 
 ```bash
 CODE2_INSTANCE_TYPE=t4g.large CODE2_CODE_SERVER_VERSION=4.140.0 infra/deploy.sh stack plan
-infra/deploy.sh stack apply      # 인스턴스가 중지 후 시작되며 새 버전을 설치합니다 (몇 분 다운타임)
+infra/deploy.sh stack apply      # 인스턴스 유형이 바뀌어 중지 후 시작되고, 부팅 때 새 버전을 설치합니다
 infra/deploy.sh status           # 설치된 버전 확인
 ```
 
 ### 인스턴스 교체
 
-AMI, 루트 볼륨 크기, 아키텍처가 바뀌면 인스턴스가 교체됩니다. 버전·설정처럼 user data만 바뀌면 교체 없이 중지 후 시작합니다(CloudFormation 변경 세트는 이때도 `Conditional`로 표시하지만, `plan`은 교체로 보지 않습니다).
+AMI, 루트 볼륨 크기, 아키텍처가 바뀌면 인스턴스가 교체됩니다. 같은 아키텍처 안에서 인스턴스 유형만 바뀌면 교체 없이 중지 후 시작하고, 버전·설정은 인스턴스를 건드리지 않습니다. user data는 스택을 이 구조로 옮길 때 한 번만 바뀌며, 이때도 교체 없이 중지 후 시작합니다(CloudFormation 변경 세트는 `Conditional`로 표시하지만, `plan`은 교체로 보지 않습니다).
 
 1. CloudFormation이 새 인스턴스를 만듭니다. 새 인스턴스는 `/home` 볼륨이 풀릴 때까지 기다립니다.
 2. CloudFront VPC origin은 배포에 연결된 채로 다른 인스턴스를 가리키도록 바꿀 수 없습니다. 그래서 `plan`이 인스턴스 재생성을 감지하면 VPC origin 슬롯(`OriginSlot`, a↔b)을 바꿉니다. 새 인스턴스용 VPC origin을 만들고 배포를 그쪽으로 돌립니다.
@@ -288,7 +290,7 @@ sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)
 | `stack apply`가 `BootWait` 실패로 롤백 | 이벤트 사유에 실패한 줄과 로그 끝부분이 있습니다. `ROLLBACK_COMPLETE` 스택은 고칠 수 없으므로 `destroy` 후 다시 `plan`합니다. 원인을 직접 보려면 `CODE2_KEEP_ON_FAILURE=1`로 apply합니다 |
 | `plan`이 "busy" 또는 `UPDATE_ROLLBACK_FAILED`로 멈춤 | 진행 중인 작업이 끝나기를 기다리거나, 안내된 `continue-update-rollback`을 실행합니다 |
 | 처음 몇 분 또는 인스턴스 교체 중 502 | CloudFront 배포가 끝나기 전이거나, 새 인스턴스가 볼륨을 기다리는 중입니다. `logs -f`로 진행을 봅니다 |
-| 업데이트 뒤 설정이 반영되지 않음 | 인스턴스가 재시작되지 않는 변경이었으면 `reconfigure`로 바로 적용합니다 |
+| 업데이트 뒤 설정이 반영되지 않음 | `apply`가 끝에 경고를 냈다면 인스턴스가 아직 Systems Manager에 연결되지 않은 경우입니다. 이때는 부팅 때 스크립트가 실행되니 `logs`로 확인하고, 실행되지 않았으면 `reconfigure`를 실행합니다. 부팅 중인 인스턴스에서는 `apply`의 실행이 부팅 실행이 끝날 때까지 기다렸다가 한 번 더 돕니다 |
 | `destroy`가 VPC 삭제에서 실패 | CloudFront가 만든 `CloudFront-VPCOrigins-Service-SG`가 늦게 지워지는 경우입니다. 잠시 뒤 `destroy`를 다시 실행합니다 |
 
 ### 주의
@@ -306,7 +308,7 @@ sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)
 
 1. `stack plan` → `stack apply`: 지금 배포된 템플릿에 볼륨 연결 `Retain`만 더합니다(리소스 변경 없음).
 2. `stack plan` → `stack apply`: 현재 템플릿으로 옮깁니다. 볼륨 연결은 스택에서만 빠지고 실제로는 붙어 있습니다. user data가 바뀌어 인스턴스가 한 번 중지 후 시작됩니다.
-3. `infra/deploy.sh reconfigure`: 기존 인스턴스는 옛 설정으로 부팅되었으므로, 새 설정(부팅 시 재실행, CloudWatch 에이전트, 자동 보안 업데이트 등)을 한 번 적용합니다.
+2단계의 `apply`가 끝에서 새 설정(부팅 시 재실행, CloudWatch 에이전트, 자동 보안 업데이트 등)을 인스턴스에 적용합니다. 경고가 나왔을 때만 `infra/deploy.sh reconfigure`를 한 번 실행합니다.
 
 기존 스택은 `BootWait` 없이(`WaitForBoot=false`) 옮겨집니다.
 
@@ -331,8 +333,9 @@ code2/
 └── infra/
     ├── code2.yaml               CloudFormation: VPC·NAT·EICE(또는 기존 VPC), Cognito, EC2·EBS, CloudFront VPC origin,
     │                            CloudWatch 로그·알람, DLM 백업, (선택) Route 53
+    ├── setup.sh                 인스턴스 설정 스크립트: /home, code-server, ttyd, oauth2-proxy, CloudWatch, 업데이트, 유휴 중지
     ├── deploy.sh                plan/apply(사전 점검·이관 포함), status, logs, reconfigure, ssh, shell, stop/start, destroy
-    └── lint.sh                  cfn-lint, shellcheck (deploy.sh와 user data), 템플릿 크기, 개인 정보 검사
+    └── lint.sh                  cfn-lint, shellcheck (deploy.sh, setup.sh, user data), 템플릿 크기, 개인 정보 검사
 ```
 
 바꾼 뒤에는 `infra/lint.sh`로 검사합니다(`pip install cfn-lint`, `shellcheck` 필요). 공개 저장소라서 실제 계정 ID, 리소스 ID, 이메일, 도메인이 들어가면 실패합니다. 예시는 `example.com`과 `vpc-0123...` 같은 자리 표시자를 씁니다.
