@@ -194,6 +194,8 @@ export default {
       ...defaults,
     ],
   },
+  // Double-tap the terminal for Tab (completion without reaching for the toolbar).
+  gestures: { doubleTap: { enabled: true, data: '\t' } },
 }
 CFG
 # tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
