@@ -693,8 +693,8 @@ Resources:
           # code2 bootstrap: runs infra/setup.sh, uploaded by deploy.sh, with the settings in /${AWS::StackName}/setup.
           export CODE2_STACK=${AWS::StackName} AWS_REGION=${AWS::Region} CODE2_WAIT_HANDLE='${BootWaitHandle}'
           for n in 1 2 3 4 5; do
-            aws s3 cp --quiet --expected-bucket-owner ${AWS::AccountId} "s3://${SetupBucket}/${AWS::StackName}/setup.sh" \
-              /run/code2-setup.sh && exec bash /run/code2-setup.sh
+            aws s3api get-object --bucket ${SetupBucket} --key ${AWS::StackName}/setup.sh \
+              --expected-bucket-owner ${AWS::AccountId} /run/code2-setup.sh >/dev/null && exec bash /run/code2-setup.sh
             sleep $((n * 10))
           done
           curl -fsS -X PUT -H 'Content-Type:' --data-binary \

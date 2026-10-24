@@ -98,13 +98,18 @@ ensure_bucket() {
 # upload_setup keeps the replaced copy in $TMP/prev-setup.sh, so a failed apply can put it back (restore_setup).
 upload_setup() {
   ensure_bucket
-  aws s3 cp --quiet --expected-bucket-owner "$caller" "s3://$BUCKET/$STACK/setup.sh" "$TMP/prev-setup.sh" 2>/dev/null || true
-  aws s3 cp --quiet --expected-bucket-owner "$caller" "$SETUP" "s3://$BUCKET/$STACK/setup.sh"
+  aws s3api get-object --bucket "$BUCKET" --key "$STACK/setup.sh" --expected-bucket-owner "$caller" \
+    "$TMP/prev-setup.sh" >/dev/null 2>&1 || rm -f "$TMP/prev-setup.sh"
+  put_setup "$SETUP"
+}
+# s3api, not s3 cp: only s3api takes --expected-bucket-owner.
+put_setup() {
+  aws s3api put-object --bucket "$BUCKET" --key "$STACK/setup.sh" --body "$1" --expected-bucket-owner "$caller" >/dev/null
 }
 restore_setup() {
   [ -f "$TMP/prev-setup.sh" ] || return 0
   echo "putting the previous setup.sh back (the stack's settings rolled back)"
-  aws s3 cp --quiet --expected-bucket-owner "$caller" "$TMP/prev-setup.sh" "s3://$BUCKET/$STACK/setup.sh" || true
+  put_setup "$TMP/prev-setup.sh" || true
 }
 
 # ---------- stack state ----------
@@ -502,7 +507,7 @@ destroy() {
       --query 'StackEvents[?contains(ResourceStatus,`FAILED`)].[LogicalResourceId,ResourceStatusReason]' --output table
     die "delete did not finish; a CloudFront-VPCOrigins-Service-SG that lingers in the VPC clears after a while: run destroy again"
   fi
-  aws s3 rm --quiet --expected-bucket-owner "$caller" "s3://$BUCKET/$STACK/setup.sh" 2>/dev/null || true
+  aws s3api delete-object --bucket "$BUCKET" --key "$STACK/setup.sh" --expected-bucket-owner "$caller" >/dev/null 2>&1 || true
   if [ "$(aws s3api list-objects-v2 --bucket "$BUCKET" --expected-bucket-owner "$caller" --max-items 1 \
       --query 'length(Contents || `[]`)' --output text 2>/dev/null)" = 0 ]; then
     aws s3api delete-bucket --bucket "$BUCKET" --expected-bucket-owner "$caller" 2>/dev/null || true
