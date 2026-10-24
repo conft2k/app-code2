@@ -12,11 +12,15 @@ stack=${CODE2_STACK:?} region=${AWS_REGION:?} wait_handle=${CODE2_WAIT_HANDLE:-}
 log() { echo "code2-setup: $(date -u +%FT%TZ) $*"; }
 retry() { local n; for n in 1 2 3 4; do "$@" && return 0; log "retry $n: $1" >&2; sleep $((n * 10)); done; "$@"; }
 
-# First-boot result for BootWait; later signals are ignored.
+# First-boot result for BootWait, sent once per instance: CloudFormation ignores later signals and the
+# handle's presigned URL expires, so later runs would only log a 403.
+signaled=/var/lib/code2-boot-signaled
 signal() {
   local body
+  [ -n "$wait_handle" ] && [ ! -e $signaled ] || return 0
   body=$(python3 -c 'import json,sys; print(json.dumps({"Status": sys.argv[1], "Reason": sys.argv[2][-900:], "UniqueId": "code2", "Data": sys.argv[2][-900:]}))' "$1" "$2")
-  [ -z "$wait_handle" ] || curl -fsS --retry 3 -X PUT -H 'Content-Type:' --data-binary "$body" "$wait_handle" >/dev/null || true
+  curl -fsS --retry 3 -X PUT -H 'Content-Type:' --data-binary "$body" "$wait_handle" >/dev/null || true
+  touch $signaled
 }
 fail() {
   trap - ERR
