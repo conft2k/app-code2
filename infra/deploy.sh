@@ -28,7 +28,6 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_ROOT_SIZE              root GiB (default 30, a change replaces the instance)
   CODE2_CODE_SERVER_VERSION    code-server version (installed in place, no restart)
   CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (installed in place, no restart)
-  CODE2_TTYD_VERSION           ttyd version, the terminal at /admin/ (installed in place, no restart)
   CODE2_REMOBI_VERSION         remobi version, the phone terminal at /m/ (installed in place, no restart)
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
   CODE2_MFA                    on|off TOTP at sign-in (default on)
@@ -144,7 +143,7 @@ keep() { PARAMS=$(jq -c --arg k "$1" '. + [{ParameterKey: $k, UsePreviousValue: 
 
 # ParameterKey:ENV pairs that may change after create.
 TUNABLES="InstanceType:CODE2_INSTANCE_TYPE DataVolumeSize:CODE2_DATA_SIZE RootVolumeSize:CODE2_ROOT_SIZE
-  CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION TtydVersion:CODE2_TTYD_VERSION RemobiVersion:CODE2_REMOBI_VERSION
+  CodeServerVersion:CODE2_CODE_SERVER_VERSION OAuth2ProxyVersion:CODE2_OAUTH2_PROXY_VERSION RemobiVersion:CODE2_REMOBI_VERSION
   SessionHours:CODE2_SESSION_HOURS Mfa:CODE2_MFA PasswordMinLength:CODE2_PASSWORD_MIN_LENGTH AutoUpdates:CODE2_AUTO_UPDATES IdleStopHours:CODE2_IDLE_STOP_HOURS
   BackupRetainCount:CODE2_BACKUP_COUNT AlarmEmail:CODE2_ALARM_EMAIL PriceClass:CODE2_PRICE_CLASS
   AdminUsername:CODE2_ADMIN_USER AdminEmail:CODE2_ADMIN_EMAIL"
@@ -536,15 +535,14 @@ case "$1" in
   status)
     load_outputs
     echo "url:      $URL"
-    echo "terminal: $URL/admin/"
-    echo "phone:    $URL/m/"
+    echo "terminal: $URL/m/"
     [ -z "$LOGOUT" ] || echo "logout:   $LOGOUT"
     state=$(instance_state)
     echo "instance: $INSTANCE ($IP) $state"
     # Subshell: ssm_run dies (exits) when the instance is not in Systems Manager yet; status still ends normally.
     if [ "$state" = running ]; then
-      ( ssm_run "systemctl is-active code-server oauth2-proxy ttyd remobi | paste -sd' '" "df -h /home | tail -1" \
-        "readlink -f /usr/local/bin/code-server /usr/local/bin/oauth2-proxy /usr/local/bin/ttyd /usr/local/bin/remobi" ) || true
+      ( ssm_run "systemctl is-active code-server oauth2-proxy remobi | paste -sd' '" "df -h /home | tail -1" \
+        "readlink -f /usr/local/bin/code-server /usr/local/bin/oauth2-proxy /usr/local/bin/remobi" ) || true
     fi ;;
   logs)
     load_outputs

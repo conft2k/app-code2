@@ -32,9 +32,9 @@ trap 'fail "line $LINENO exited $?"' ERR
 
 # Stack settings (SetupConfig in code2.yaml); only these names are taken from the parameter. A new name needs a
 # default here: the stack may still hold an older parameter (reconfigure before apply, or a rolled-back update).
-code_server_version='' oauth2_proxy_version='' ttyd_version='' remobi_version=1.2.1 auto_updates='' idle_hours=''
+code_server_version='' oauth2_proxy_version='' remobi_version=1.2.1 auto_updates='' idle_hours=''
 session_hours='' vol='' user_pool='' cognito_host='' log_group=''
-settings="code_server_version oauth2_proxy_version ttyd_version remobi_version auto_updates idle_hours session_hours vol user_pool
+settings="code_server_version oauth2_proxy_version remobi_version auto_updates idle_hours session_hours vol user_pool
   cognito_host log_group"
 cfg=$(retry aws ssm get-parameter --region "$region" --name "/$stack/setup" --query Parameter.Value --output text)
 # shellcheck disable=SC2086
@@ -63,7 +63,7 @@ case $(uname -m) in
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 work=$(mktemp -d)
-log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version}, remobi ${remobi_version}, $arch)"
+log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version}, $arch)"
 
 # ---- packages ----
 # nodejs22 and gcc-c++ for remobi (node-pty builds with node-gyp)
@@ -134,41 +134,14 @@ WantedBy=multi-user.target
 UNIT
 svc code-server "$cs_restart"
 
-# ---- ttyd terminal at /admin/, behind oauth2-proxy ----
-td=/usr/local/lib/ttyd-${ttyd_version}
-if [ ! -x "$td/ttyd" ]; then
-  log "installing ttyd ${ttyd_version}"
-  base=https://github.com/tsl0922/ttyd/releases/download/${ttyd_version}
-  dl "$base/ttyd.$(uname -m)" "$work/ttyd.$(uname -m)"
-  dl "$base/SHA256SUMS" "$work/SHA256SUMS"
-  (cd "$work" && sha256sum -c --ignore-missing SHA256SUMS)
-  install -D -m 755 "$work/ttyd.$(uname -m)" "$td/ttyd"
+# ---- ttyd, the earlier terminal at /admin/ (replaced by remobi): removed if still there ----
+if [ -f /etc/systemd/system/ttyd.service ]; then
+  log "removing ttyd"
+  systemctl disable -q --now ttyd || true
+  rm -f /etc/systemd/system/ttyd.service /usr/local/bin/ttyd
+  rm -rf /usr/local/lib/ttyd-*
+  systemctl daemon-reload
 fi
-td_restart=
-[ "$(readlink -f /usr/local/bin/ttyd)" = "$td/ttyd" ] || td_restart=1
-ln -sfn "$td/ttyd" /usr/local/bin/ttyd
-# Loopback only, like code-server; no -H: ttyd 1.7.7 copies that header into 30 bytes and
-# Cognito's sub (36) fails, refusing every WebSocket. KillMode=process keeps tmux on restart.
-# No resize overlay: on a phone it covers the screen each time the keyboard opens or closes.
-put /etc/systemd/system/ttyd.service 644 <<'UNIT' && td_restart=1 || true
-[Unit]
-Description=ttyd terminal for ec2-user at /admin/
-After=network-online.target home.mount
-RequiresMountsFor=/home/ec2-user
-
-[Service]
-User=ec2-user
-WorkingDirectory=/home/ec2-user
-Environment=HOME=/home/ec2-user
-ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -b /admin -W -t fontSize=15 -t disableLeaveAlert=true -t disableResizeOverlay=true tmux new -A -s admin
-KillMode=process
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-svc ttyd "$td_restart"
 
 # ---- remobi, the phone terminal at /m/, behind oauth2-proxy ----
 rd=/usr/local/lib/remobi-${remobi_version}
@@ -183,8 +156,9 @@ fi
 rm_restart=
 [ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
 ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
-# Same tmux session as ttyd, so either one picks up where the other left off. Loopback only; remobi checks the
-# WebSocket Origin against Host, which CloudFront and oauth2-proxy pass through. Config: ~/.config/remobi/.
+# tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
+# Origin against Host, which CloudFront and oauth2-proxy pass through. Config: ~/.config/remobi/.
+# KillMode=process keeps tmux on restart.
 put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
 [Unit]
 Description=remobi phone terminal for ec2-user at /m/
@@ -234,9 +208,8 @@ client_id=$(jq -r .clientId <<<"$conf")
 url=$(jq -r .url <<<"$conf")
 put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
 http_address = "0.0.0.0:80"
-# "/admin/" matches the prefix; "/admin" alone matches only itself and ttyd redirects it to /admin/
-upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7681/admin/", "http://127.0.0.1:7681/admin",
-  "http://127.0.0.1:7682/m/", "http://127.0.0.1:7682/m"]
+# "/m/" matches the prefix; "/m" alone matches only itself and remobi redirects it to /m/
+upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/m/", "http://127.0.0.1:7682/m"]
 provider = "oidc"
 provider_display_name = "Cognito"
 oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
@@ -272,7 +245,7 @@ printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret
   | put /etc/oauth2-proxy/secrets.env 600 && op_restart=1 || true
 put /etc/systemd/system/oauth2-proxy.service 644 <<'UNIT' && op_restart=1 || true
 [Unit]
-Description=oauth2-proxy (Cognito sign-in in front of code-server, ttyd and remobi)
+Description=oauth2-proxy (Cognito sign-in in front of code-server and remobi)
 After=network-online.target
 Wants=network-online.target
 
@@ -382,4 +355,4 @@ HOOK
 
 rm -rf "$work"
 log "done"
-signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version}, remobi ${remobi_version} running"
+signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version} running"

@@ -11,7 +11,7 @@ Metadata:
         Parameters: [AdminUsername, AdminEmail, Mfa, PasswordMinLength, SessionHours]
       - Label: { default: Server }
         Parameters: [InstanceType, ImageId, RootVolumeSize, DataVolumeSize, DataSnapshotId, CodeServerVersion,
-                     OAuth2ProxyVersion, TtydVersion, RemobiVersion, AutoUpdates, IdleStopHours]
+                     OAuth2ProxyVersion, RemobiVersion, AutoUpdates, IdleStopHours]
       - Label: { default: Operations }
         Parameters: [BackupRetainCount, AlarmEmail, WaitForBoot, OriginSlot, SetupBucket]
       - Label: { default: Network (create-time) }
@@ -127,11 +127,6 @@ Parameters:
     Default: 7.15.5
     AllowedPattern: '^\d+\.\d+\.\d+$'
     Description: Installed in place by deploy.sh (no restart)
-  TtydVersion:
-    Type: String
-    Default: 1.7.7
-    AllowedPattern: '^\d+\.\d+\.\d+$'
-    Description: Browser terminal at /admin/; installed in place by deploy.sh (no restart)
   RemobiVersion:
     Type: String
     Default: 1.2.1
@@ -571,7 +566,7 @@ Resources:
       Value: !Sub
         - >-
           {"code_server_version":"${CodeServerVersion}","oauth2_proxy_version":"${OAuth2ProxyVersion}",
-          "ttyd_version":"${TtydVersion}","remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","idle_hours":"${IdleStopHours}",
+          "remobi_version":"${RemobiVersion}","auto_updates":"${AutoUpdates}","idle_hours":"${IdleStopHours}",
           "session_hours":"${SessionHours}","vol":"${DataVolume}","user_pool":"${UserPool}",
           "cognito_host":"${CognitoHost}","log_group":"${LogGroup}"}
         # Not from UserPoolDomain (it waits for DnsA, which waits for the instance).
