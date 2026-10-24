@@ -32,9 +32,9 @@ trap 'fail "line $LINENO exited $?"' ERR
 
 # Stack settings (SetupConfig in code2.yaml); only these names are taken from the parameter. A new name needs a
 # default here: the stack may still hold an older parameter (reconfigure before apply, or a rolled-back update).
-code_server_version='' oauth2_proxy_version='' ttyd_version='' auto_updates='' idle_hours='' session_hours=''
-vol='' user_pool='' cognito_host='' log_group=''
-settings="code_server_version oauth2_proxy_version ttyd_version auto_updates idle_hours session_hours vol user_pool
+code_server_version='' oauth2_proxy_version='' ttyd_version='' remobi_version=1.2.1 auto_updates='' idle_hours=''
+session_hours='' vol='' user_pool='' cognito_host='' log_group=''
+settings="code_server_version oauth2_proxy_version ttyd_version remobi_version auto_updates idle_hours session_hours vol user_pool
   cognito_host log_group"
 cfg=$(retry aws ssm get-parameter --region "$region" --name "/$stack/setup" --query Parameter.Value --output text)
 # shellcheck disable=SC2086
@@ -42,7 +42,8 @@ eval "$(python3 -c '
 import json, shlex, sys
 cfg = json.loads(sys.argv[1])
 for k in sys.argv[2:]:
-    print(k + "=" + shlex.quote(str(cfg.get(k, ""))))' "$cfg" $settings)"
+    if k in cfg:
+        print(k + "=" + shlex.quote(str(cfg[k])))' "$cfg" $settings)"
 for v in $settings; do [ -n "${!v}" ] || fail "/$stack/setup has no $v"; done
 vol_serial=${vol/-/}   # nvme serial = volume id without the dash
 
@@ -62,10 +63,11 @@ case $(uname -m) in
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 work=$(mktemp -d)
-log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version}, $arch)"
+log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version}, remobi ${remobi_version}, $arch)"
 
 # ---- packages ----
-pkgs="git tmux jq gcc make tar xfsprogs python3-pip amazon-cloudwatch-agent"
+# nodejs22 and gcc-c++ for remobi (node-pty builds with node-gyp)
+pkgs="git tmux jq gcc gcc-c++ make tar xfsprogs python3-pip amazon-cloudwatch-agent nodejs22 nodejs22-npm"
 if [ "$auto_updates" = true ]; then
   echo latest | put /etc/dnf/vars/releasever 644 || true   # follow new AL2023 releases, not the AMI's
   pkgs="$pkgs dnf-automatic"
@@ -147,6 +149,7 @@ td_restart=
 ln -sfn "$td/ttyd" /usr/local/bin/ttyd
 # Loopback only, like code-server; no -H: ttyd 1.7.7 copies that header into 30 bytes and
 # Cognito's sub (36) fails, refusing every WebSocket. KillMode=process keeps tmux on restart.
+# No resize overlay: on a phone it covers the screen each time the keyboard opens or closes.
 put /etc/systemd/system/ttyd.service 644 <<'UNIT' && td_restart=1 || true
 [Unit]
 Description=ttyd terminal for ec2-user at /admin/
@@ -157,7 +160,7 @@ RequiresMountsFor=/home/ec2-user
 User=ec2-user
 WorkingDirectory=/home/ec2-user
 Environment=HOME=/home/ec2-user
-ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -b /admin -W -t fontSize=15 -t disableLeaveAlert=true tmux new -A -s admin
+ExecStart=/usr/local/bin/ttyd -i lo -p 7681 -b /admin -W -t fontSize=15 -t disableLeaveAlert=true -t disableResizeOverlay=true tmux new -A -s admin
 KillMode=process
 Restart=always
 RestartSec=2
@@ -166,6 +169,41 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
 svc ttyd "$td_restart"
+
+# ---- remobi, the phone terminal at /m/, behind oauth2-proxy ----
+rd=/usr/local/lib/remobi-${remobi_version}
+rcli=$rd/lib/node_modules/remobi/dist/cli.mjs
+if [ ! -f "$rcli" ]; then
+  log "installing remobi ${remobi_version}"
+  rm -rf "$work/remobi"
+  # npm checks each package against the registry's integrity hash; dependencies follow remobi's ranges.
+  HOME=/root retry npm-22 install -g -q --no-audit --no-fund --omit=dev --prefix "$work/remobi" "remobi@${remobi_version}"
+  rm -rf "$rd" && mv "$work/remobi" "$rd"
+fi
+rm_restart=
+[ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
+ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
+# Same tmux session as ttyd, so either one picks up where the other left off. Loopback only; remobi checks the
+# WebSocket Origin against Host, which CloudFront and oauth2-proxy pass through. Config: ~/.config/remobi/.
+put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
+[Unit]
+Description=remobi phone terminal for ec2-user at /m/
+After=network-online.target home.mount
+RequiresMountsFor=/home/ec2-user
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+Environment=HOME=/home/ec2-user
+ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /m -- tmux new -A -s admin
+KillMode=process
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+svc remobi "$rm_restart"
 
 # ---- oauth2-proxy (Cognito OIDC) on :80 ----
 opd=/usr/local/lib/oauth2-proxy-v${oauth2_proxy_version}
@@ -197,7 +235,8 @@ url=$(jq -r .url <<<"$conf")
 put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
 http_address = "0.0.0.0:80"
 # "/admin/" matches the prefix; "/admin" alone matches only itself and ttyd redirects it to /admin/
-upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7681/admin/", "http://127.0.0.1:7681/admin"]
+upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7681/admin/", "http://127.0.0.1:7681/admin",
+  "http://127.0.0.1:7682/m/", "http://127.0.0.1:7682/m"]
 provider = "oidc"
 provider_display_name = "Cognito"
 oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
@@ -233,7 +272,7 @@ printf 'OAUTH2_PROXY_CLIENT_SECRET=%s\nOAUTH2_PROXY_COOKIE_SECRET=%s\n' "$secret
   | put /etc/oauth2-proxy/secrets.env 600 && op_restart=1 || true
 put /etc/systemd/system/oauth2-proxy.service 644 <<'UNIT' && op_restart=1 || true
 [Unit]
-Description=oauth2-proxy (Cognito sign-in in front of code-server and ttyd)
+Description=oauth2-proxy (Cognito sign-in in front of code-server, ttyd and remobi)
 After=network-online.target
 Wants=network-online.target
 
@@ -343,4 +382,4 @@ HOOK
 
 rm -rf "$work"
 log "done"
-signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version} running"
+signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, ttyd ${ttyd_version}, remobi ${remobi_version} running"
