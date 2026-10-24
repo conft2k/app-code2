@@ -161,6 +161,9 @@ put /etc/remobi/compact.css 644 <<'CSS' || true
 /* code2: no empty second row, tighter padding, half the home-indicator inset */
 #wt-toolbar .wt-row:empty{display:none}
 #wt-toolbar{padding:3px 4px calc(3px + env(safe-area-inset-bottom,0px) * .5) 4px}
+/* 40px buttons with or without the keyboard; 60px wide, shrinking to fit a narrow screen */
+#wt-toolbar button,#wt-toolbar.wt-kb-open button{min-height:40px}
+#wt-toolbar .wt-row:first-child button{width:60px}
 CSS
 rcss=$rd/lib/node_modules/remobi/dist/client.css
 [ -f "$rcss.orig" ] || cp "$rcss" "$rcss.orig"
