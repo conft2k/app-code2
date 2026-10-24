@@ -156,8 +156,36 @@ fi
 rm_restart=
 [ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
 ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
+# Toolbar on one row so the terminal keeps the screen; overrides go in /etc/remobi/remobi.config.local.mjs.
+put /etc/remobi/remobi.config.mjs 644 <<'CFG' && rm_restart=1 || true
+// code2: one toolbar row; the rest of the keys move to the ☰ drawer.
+const send = (id, label, description, data) => ({ id, label, description, action: { type: 'send', data } })
+const moved = new Set(['shift-tab', 'enter'])
+export default {
+  toolbar: {
+    row1: (defaults) => [
+      ...defaults.filter((b) => !moved.has(b.id)),
+      { id: 'drawer-toggle', label: '☰', description: 'Open command drawer', action: { type: 'drawer-toggle' } },
+    ],
+    row2: [],
+  },
+  drawer: {
+    buttons: (defaults) => [
+      { id: 'paste', label: 'Paste', description: 'Paste from clipboard', action: { type: 'paste' } },
+      send('enter', '⏎', 'Send Enter', '\r'),
+      send('backspace', '⌫', 'Send Backspace key', '\x7f'),
+      send('space', 'Space', 'Send Space', ' '),
+      send('shift-tab', 'S-Tab', 'Send Shift+Tab', '\x1b[Z'),
+      send('ctrl-d', 'C-d', 'Send Ctrl+D', '\x04'),
+      send('alt-enter', 'M-↵', 'Send Alt+Enter (ESC + Enter)', '\x1b\r'),
+      send('q', 'q', 'Send q', 'q'),
+      ...defaults,
+    ],
+  },
+}
+CFG
 # tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
-# Origin against Host, which CloudFront and oauth2-proxy pass through. Config: ~/.config/remobi/.
+# Origin against Host, which CloudFront and oauth2-proxy pass through.
 # KillMode=process keeps tmux on restart.
 put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
 [Unit]
@@ -169,7 +197,7 @@ RequiresMountsFor=/home/ec2-user
 User=ec2-user
 WorkingDirectory=/home/ec2-user
 Environment=HOME=/home/ec2-user
-ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /r -- tmux new -A -s admin
+ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /r --config /etc/remobi/remobi.config.mjs -- tmux new -A -s admin
 KillMode=process
 Restart=always
 RestartSec=2
