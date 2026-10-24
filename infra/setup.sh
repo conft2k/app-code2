@@ -156,6 +156,15 @@ fi
 rm_restart=
 [ "$(readlink -f /usr/local/bin/remobi)" = "$rcli" ] || rm_restart=1
 ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
+# Thinner toolbar: remobi has no style setting, so this CSS is appended to the stylesheet it inlines at start.
+put /etc/remobi/compact.css 644 <<'CSS' || true
+/* code2: no empty second row, tighter padding, half the home-indicator inset */
+#wt-toolbar .wt-row:empty{display:none}
+#wt-toolbar{padding:3px 4px calc(3px + env(safe-area-inset-bottom,0px) * .5) 4px}
+CSS
+rcss=$rd/lib/node_modules/remobi/dist/client.css
+[ -f "$rcss.orig" ] || cp "$rcss" "$rcss.orig"
+cat "$rcss.orig" /etc/remobi/compact.css | put "$rcss" 644 && rm_restart=1 || true
 # Toolbar on one row so the terminal keeps the screen; overrides go in /etc/remobi/remobi.config.local.mjs.
 put /etc/remobi/remobi.config.mjs 644 <<'CFG' && rm_restart=1 || true
 // code2: one toolbar row; the rest of the keys move to the ☰ drawer.

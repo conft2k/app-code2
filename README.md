@@ -146,7 +146,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 방법 | 방법 |
 |---|---|
 | 브라우저 | `infra/deploy.sh status`의 URL에서 로그인. 터미널은 `` Ctrl+` ``. 로그아웃은 `status`의 logout 주소 |
-| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 툴바는 한 줄(Esc, Prefix, Tab, 방향키, C-c, ☰)이고 나머지 키(Paste, ⏎, ⌫, Space, S-Tab, C-d 등)와 tmux 명령은 ☰ 서랍에 있습니다. 이 배치는 setup.sh가 `/etc/remobi/remobi.config.mjs`로 관리하고, 버튼과 제스처를 더 바꾸려면 `/etc/remobi/remobi.config.local.mjs`에 덮어쓸 값만 적은 뒤 `sudo systemctl restart remobi` 합니다 |
+| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 툴바는 한 줄(Esc, Prefix, Tab, 방향키, C-c, ☰)이고 나머지 키(Paste, ⏎, ⌫, Space, S-Tab, C-d 등)와 tmux 명령은 ☰ 서랍에 있습니다. 툴바 두께는 remobi에 스타일 설정이 없어서 setup.sh가 remobi의 `client.css` 뒤에 `/etc/remobi/compact.css`를 덧붙여 줄입니다. 이 배치는 setup.sh가 `/etc/remobi/remobi.config.mjs`로 관리하고, 버튼과 제스처를 더 바꾸려면 `/etc/remobi/remobi.config.local.mjs`에 덮어쓸 값만 적은 뒤 `sudo systemctl restart remobi` 합니다 |
 | 개발 서버 미리 보기 | 인스턴스에서 띄운 웹 서버는 `<URL>/proxy/<포트>/` 로 엽니다(로그인 필요). 경로 접두사를 그대로 넘기려면 `/absproxy/<포트>/` 를 씁니다 |
 | SSH | `infra/deploy.sh ssh` |
 | VS Code Remote-SSH | `infra/deploy.sh ssh-config`가 출력하는 블록을 `~/.ssh/config`에 붙이고, 접속 전에 같은 출력에 있는 `send-ssh-public-key` 명령으로 키를 넣습니다 |
