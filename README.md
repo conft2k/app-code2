@@ -80,6 +80,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 2. **oauth2-proxy**가 세션 쿠키(`_code2`)를 확인합니다. 쿠키가 없으면 Cognito 관리형 로그인 페이지로 보냅니다. Authorization code + PKCE(S256) 방식입니다.
 3. 사용자가 암호와 TOTP(`Mfa=on`일 때)로 로그인하면 Cognito가 `/oauth2/callback`으로 되돌려 보냅니다. oauth2-proxy는 코드를 토큰으로 바꾸고 ID 토큰을 검증한 뒤 세션 쿠키를 발급합니다.
 4. 이후 요청은 oauth2-proxy가 `127.0.0.1:8080`의 **code-server**로 프록시합니다. 에디터와 터미널이 쓰는 WebSocket도 같은 경로로 지나갑니다. code-server는 `--auth none`이라 따로 로그인을 묻지 않고, 루프백에만 열려 있어서 oauth2-proxy를 거치지 않고는 닿을 수 없습니다.
+   `/admin/` 아래 요청은 같은 세션으로 `127.0.0.1:7681`의 **ttyd**(브라우저 터미널)로 갑니다. ttyd도 루프백에만 열려 있고, oauth2-proxy가 넣는 사용자 헤더(`X-Forwarded-User`)가 없는 요청은 거부합니다.
 5. 세션은 최대 `SessionHours`(기본 12시간) 유지됩니다. oauth2-proxy가 30분마다 refresh 토큰으로 갱신하고, refresh 토큰이 만료되면 다시 로그인해야 합니다.
 6. 로그아웃은 `status`에 나오는 **logout** 주소로 합니다. oauth2-proxy 세션과 Cognito 세션을 모두 끝내고 로그인 화면으로 돌아옵니다.
 
@@ -109,7 +110,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 인스턴스 역할 | SSM 관리, CloudWatch 에이전트, 자기 Cognito 클라이언트 읽기, 자기 `/home` 볼륨 붙이기(이 볼륨 + 이 인스턴스 프로필로 한정) |
 | 인스턴스 | IMDSv2 필수(hop limit 1), EBS 암호화, oauth2-proxy는 전용 시스템 사용자로 실행하고 `:80` 바인딩 권한만 가집니다(`ProtectSystem=strict`) |
 | 패치 | 기본으로 dnf-automatic이 매일 **보안 업데이트**를 적용합니다(최신 AL2023 저장소를 따라감, 자동 재부팅은 하지 않음). 커널 업데이트는 재부팅해야 적용됩니다 |
-| 소프트웨어 | code-server와 oauth2-proxy 버전을 파라미터로 고정합니다. 다운로드는 재시도합니다. oauth2-proxy 압축 파일은 릴리스의 sha256 파일로 무결성을 확인합니다(같은 출처라 위변조 방지는 아닙니다) |
+| 소프트웨어 | code-server, oauth2-proxy, ttyd 버전을 파라미터로 고정합니다. 다운로드는 재시도합니다. oauth2-proxy와 ttyd 파일은 릴리스의 sha256 파일로 무결성을 확인합니다(같은 출처라 위변조 방지는 아닙니다) |
 
 > 로그인하면 `ec2-user` 권한의 셸과 **sudo**를 쓸 수 있습니다. 인스턴스 역할 자격 증명(위 표)에도 닿을 수 있습니다. 계정은 꼭 필요한 사람에게만 만들어 주세요.
 
@@ -124,6 +125,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
 | code-server | 4.139.1, `127.0.0.1:8080`, 텔레메트리와 업데이트 확인 끔 |
+| ttyd | 1.7.7, `127.0.0.1:7681`, `<URL>/admin/`. `ec2-user`의 tmux 세션 `admin`을 엽니다 |
 | 확장 마켓플레이스 | Open VSX (code-server 기본값) |
 
 ### 기본 설치 도구
@@ -142,6 +144,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 방법 | 방법 |
 |---|---|
 | 브라우저 | `infra/deploy.sh status`의 URL에서 로그인. 터미널은 `` Ctrl+` ``. 로그아웃은 `status`의 logout 주소 |
+| 브라우저 터미널 | `<URL>/admin/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다 |
 | 개발 서버 미리 보기 | 인스턴스에서 띄운 웹 서버는 `<URL>/proxy/<포트>/` 로 엽니다(로그인 필요). 경로 접두사를 그대로 넘기려면 `/absproxy/<포트>/` 를 씁니다 |
 | SSH | `infra/deploy.sh ssh` |
 | VS Code Remote-SSH | `infra/deploy.sh ssh-config`가 출력하는 블록을 `~/.ssh/config`에 붙이고, 접속 전에 같은 출력에 있는 `send-ssh-public-key` 명령으로 키를 넣습니다 |
@@ -272,7 +275,7 @@ aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <이름
 ### 인스턴스에서 직접 확인
 
 ```bash
-systemctl status code-server oauth2-proxy
+systemctl status code-server oauth2-proxy ttyd
 journalctl -u oauth2-proxy -n 50        # 로그인 / 콜백 오류
 journalctl -u code-server -n 50
 sudo tail -n 50 /var/log/code2-setup.log # 부팅 설정 기록 (매 부팅)

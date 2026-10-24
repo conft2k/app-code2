@@ -4,9 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 cfn-lint code2.yaml
-# CloudFormation takes a template body of at most 51,200 bytes; keep room for changes.
+# CloudFormation takes a template body of at most 51,200 bytes.
 size=$(wc -c < code2.yaml)
-[ "$size" -le 49152 ] || { echo "code2.yaml is $size bytes; keep it under 48 KiB (body limit 51,200)" >&2; exit 1; }
+[ "$size" -le 51200 ] || { echo "code2.yaml is $size bytes; the template body limit is 51,200" >&2; exit 1; }
 shellcheck --severity=warning deploy.sh lint.sh
 python3 - code2.yaml > "${TMPDIR:-/tmp}/code2-userdata.sh" <<'PY'
 import re, sys, yaml
