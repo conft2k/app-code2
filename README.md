@@ -80,7 +80,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 2. **oauth2-proxy**가 세션 쿠키(`_code2`)를 확인합니다. 쿠키가 없으면 Cognito 관리형 로그인 페이지로 보냅니다. Authorization code + PKCE(S256) 방식입니다.
 3. 사용자가 암호와 TOTP(`Mfa=on`일 때)로 로그인하면 Cognito가 `/oauth2/callback`으로 되돌려 보냅니다. oauth2-proxy는 코드를 토큰으로 바꾸고 ID 토큰을 검증한 뒤 세션 쿠키를 발급합니다.
 4. 이후 요청은 oauth2-proxy가 `127.0.0.1:8080`의 **code-server**로 프록시합니다. 에디터와 터미널이 쓰는 WebSocket도 같은 경로로 지나갑니다. code-server는 `--auth none`이라 따로 로그인을 묻지 않고, 루프백에만 열려 있어서 oauth2-proxy를 거치지 않고는 닿을 수 없습니다.
-   `/m`과 그 아래 요청은 같은 세션으로 `127.0.0.1:7682`의 **remobi**(브라우저 터미널)로 갑니다. remobi도 code-server처럼 루프백에만 열려 있어서 oauth2-proxy를 거쳐야만 닿습니다.
+   `/r`과 그 아래 요청은 같은 세션으로 `127.0.0.1:7682`의 **remobi**(브라우저 터미널)로 갑니다. remobi도 code-server처럼 루프백에만 열려 있어서 oauth2-proxy를 거쳐야만 닿습니다.
 5. 세션은 최대 `SessionHours`(기본 12시간) 유지됩니다. oauth2-proxy가 30분마다 refresh 토큰으로 갱신하고, refresh 토큰이 만료되면 다시 로그인해야 합니다.
 6. 로그아웃은 `status`에 나오는 **logout** 주소로 합니다. oauth2-proxy 세션과 Cognito 세션을 모두 끝내고 로그인 화면으로 돌아옵니다.
 
@@ -127,7 +127,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
 | code-server | 4.139.1, `127.0.0.1:8080`, 텔레메트리와 업데이트 확인 끔 |
-| remobi | 1.2.1 (Node.js 22), `127.0.0.1:7682`, `<URL>/m/`. `ec2-user`의 tmux 세션 `admin`을 엽니다 |
+| remobi | 1.2.1 (Node.js 22), `127.0.0.1:7682`, `<URL>/r/`. `ec2-user`의 tmux 세션 `admin`을 엽니다 |
 | 확장 마켓플레이스 | Open VSX (code-server 기본값) |
 
 ### 기본 설치 도구
@@ -146,7 +146,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 | 방법 | 방법 |
 |---|---|
 | 브라우저 | `infra/deploy.sh status`의 URL에서 로그인. 터미널은 `` Ctrl+` ``. 로그아웃은 `status`의 logout 주소 |
-| 브라우저 터미널 | `<URL>/m/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 버튼과 제스처는 `~/.config/remobi/remobi.config.ts`로 바꿉니다(`remobi init`) |
+| 브라우저 터미널 | `<URL>/r/`에서 에디터 없이 터미널만 엽니다(로그인은 code-server와 같은 세션). 휴대폰에 맞춘 [remobi](https://github.com/connorads/remobi)이고, tmux 세션 `admin`에 붙으므로 창을 닫았다 열어도 작업이 이어지고, SSH에서는 `tmux attach -t admin`으로 같은 화면을 봅니다. 터치 툴바(Esc, Prefix 등)와 명령 서랍이 있고, 좌우로 밀면 tmux 창이 바뀌고 두 손가락으로 글자 크기를 바꿉니다. 브라우저 메뉴의 "홈 화면에 추가"로 앱처럼 쓸 수 있습니다. 버튼과 제스처는 `~/.config/remobi/remobi.config.ts`로 바꿉니다(`remobi init`) |
 | 개발 서버 미리 보기 | 인스턴스에서 띄운 웹 서버는 `<URL>/proxy/<포트>/` 로 엽니다(로그인 필요). 경로 접두사를 그대로 넘기려면 `/absproxy/<포트>/` 를 씁니다 |
 | SSH | `infra/deploy.sh ssh` |
 | VS Code Remote-SSH | `infra/deploy.sh ssh-config`가 출력하는 블록을 `~/.ssh/config`에 붙이고, 접속 전에 같은 출력에 있는 `send-ssh-public-key` 명령으로 키를 넣습니다 |

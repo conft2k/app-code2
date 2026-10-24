@@ -131,7 +131,7 @@ Parameters:
     Type: String
     Default: 1.2.1
     AllowedPattern: '^\d+\.\d+\.\d+$'
-    Description: Phone terminal at /m/ (npm package remobi); installed in place by deploy.sh (no restart)
+    Description: Phone terminal at /r/ (npm package remobi); installed in place by deploy.sh (no restart)
   AutoUpdates:
     Type: String
     Default: "true"

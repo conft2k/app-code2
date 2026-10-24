@@ -28,7 +28,7 @@ Settings (environment). Unset ones keep their current value on update; create-ti
   CODE2_ROOT_SIZE              root GiB (default 30, a change replaces the instance)
   CODE2_CODE_SERVER_VERSION    code-server version (installed in place, no restart)
   CODE2_OAUTH2_PROXY_VERSION   oauth2-proxy version (installed in place, no restart)
-  CODE2_REMOBI_VERSION         remobi version, the phone terminal at /m/ (installed in place, no restart)
+  CODE2_REMOBI_VERSION         remobi version, the phone terminal at /r/ (installed in place, no restart)
   CODE2_SESSION_HOURS          sign-in lifetime (default 12)
   CODE2_MFA                    on|off TOTP at sign-in (default on)
   CODE2_PASSWORD_MIN_LENGTH    minimum password length, 8-99 (default 12)
@@ -535,7 +535,7 @@ case "$1" in
   status)
     load_outputs
     echo "url:      $URL"
-    echo "terminal: $URL/m/"
+    echo "terminal: $URL/r/"
     [ -z "$LOGOUT" ] || echo "logout:   $LOGOUT"
     state=$(instance_state)
     echo "instance: $INSTANCE ($IP) $state"

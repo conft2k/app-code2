@@ -143,7 +143,7 @@ if [ -f /etc/systemd/system/ttyd.service ]; then
   systemctl daemon-reload
 fi
 
-# ---- remobi, the phone terminal at /m/, behind oauth2-proxy ----
+# ---- remobi, the phone terminal at /r/, behind oauth2-proxy ----
 rd=/usr/local/lib/remobi-${remobi_version}
 rcli=$rd/lib/node_modules/remobi/dist/cli.mjs
 if [ ! -f "$rcli" ]; then
@@ -161,7 +161,7 @@ ln -sfn "$rd/bin/remobi" /usr/local/bin/remobi
 # KillMode=process keeps tmux on restart.
 put /etc/systemd/system/remobi.service 644 <<'UNIT' && rm_restart=1 || true
 [Unit]
-Description=remobi phone terminal for ec2-user at /m/
+Description=remobi phone terminal for ec2-user at /r/
 After=network-online.target home.mount
 RequiresMountsFor=/home/ec2-user
 
@@ -169,7 +169,7 @@ RequiresMountsFor=/home/ec2-user
 User=ec2-user
 WorkingDirectory=/home/ec2-user
 Environment=HOME=/home/ec2-user
-ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /m -- tmux new -A -s admin
+ExecStart=/usr/bin/node-22 /usr/local/bin/remobi serve --host 127.0.0.1 --port 7682 --base-path /r -- tmux new -A -s admin
 KillMode=process
 Restart=always
 RestartSec=2
@@ -208,8 +208,8 @@ client_id=$(jq -r .clientId <<<"$conf")
 url=$(jq -r .url <<<"$conf")
 put /etc/oauth2-proxy/oauth2-proxy.cfg 644 <<CFG && op_restart=1 || true
 http_address = "0.0.0.0:80"
-# "/m/" matches the prefix; "/m" alone matches only itself and remobi redirects it to /m/
-upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/m/", "http://127.0.0.1:7682/m"]
+# "/r/" matches the prefix; "/r" alone matches only itself and remobi redirects it to /r/
+upstreams = ["http://127.0.0.1:8080/", "http://127.0.0.1:7682/r/", "http://127.0.0.1:7682/r"]
 provider = "oidc"
 provider_display_name = "Cognito"
 oidc_issuer_url = "https://cognito-idp.$region.amazonaws.com/${user_pool}"
