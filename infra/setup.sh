@@ -198,6 +198,13 @@ export default {
   gestures: { doubleTap: { enabled: true, data: '\t' } },
 }
 CFG
+# tmux 3.6a segfaults on copy mode's refresh-from-pane (r) after the window was resized, e.g. by a second
+# remobi client, and the crash takes every session down. /etc/tmux.conf loads before ~/.tmux.conf.
+put /etc/tmux.conf 644 <<'TMUX' && runuser -u ec2-user -- tmux source-file /etc/tmux.conf 2>/dev/null || true
+# code2: r in copy mode runs refresh-from-pane, which crashes tmux 3.6a
+unbind-key -T copy-mode r
+unbind-key -T copy-mode-vi r
+TMUX
 # tmux session admin, so a closed tab picks up where it left off. Loopback only; remobi checks the WebSocket
 # Origin against Host, which CloudFront and oauth2-proxy pass through.
 # KillMode=process keeps tmux on restart.
