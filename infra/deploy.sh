@@ -349,11 +349,13 @@ make_change_set() {
 }
 
 # recreates_instance <change set>: the change set may replace the instance (any property needing recreation).
-# UserData reports "Conditionally" but only stops and starts an EBS-backed instance, so it does not count.
+# UserData and InstanceType report "Conditionally" but only stop and start an EBS-backed instance, so they do
+# not count. A type of another architecture also changes ImageId, which reports "Always".
 recreates_instance() {
   aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$1" --output json | jq -e \
     '[.Changes[].ResourceChange | select(.LogicalResourceId == "Instance") | .Details[].Target
-      | select(.RequiresRecreation == "Always" or (.RequiresRecreation == "Conditionally" and .Name != "UserData"))]
+      | select(.RequiresRecreation == "Always"
+          or (.RequiresRecreation == "Conditionally" and (.Name | IN("UserData", "InstanceType") | not)))]
      | length > 0' >/dev/null
 }
 
