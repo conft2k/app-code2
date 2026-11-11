@@ -168,6 +168,12 @@ CSS
 rcss=$rd/lib/node_modules/remobi/dist/client.css
 [ -f "$rcss.orig" ] || cp "$rcss" "$rcss.orig"
 cat "$rcss.orig" /etc/remobi/compact.css | put "$rcss" 644 && rm_restart=1 || true
+# Opaque status bar: as a home-screen app with black-translucent, iPadOS 18.7 sizes the page short by the
+# status bar (innerHeight 712 on a 744pt screen) yet draws it from the top of the screen, so the top rows sit
+# under the status bar and the toolbar floats 32pt above the bottom. iOS reads the style when the app launches.
+for f in "$rd"/lib/node_modules/remobi/dist/meta-tags-*.mjs; do
+  if grep -q black-translucent "$f"; then sed -i 's/black-translucent/black/' "$f" && rm_restart=1; fi
+done
 # Toolbar on one row so the terminal keeps the screen; overrides go in /etc/remobi/remobi.config.local.mjs.
 put /etc/remobi/remobi.config.mjs 644 <<'CFG' && rm_restart=1 || true
 // code2: one toolbar row; the rest of the keys move to the ☰ drawer.
