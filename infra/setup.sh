@@ -416,3 +416,46 @@ HOOK
 rm -rf "$work"
 log "done"
 signal SUCCESS "code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version} running"
+
+# ---- Claude Code and Codex for ec2-user: CLIs and code-server extensions ----
+# Last, after the BootWait signal: they are optional, and their downloads must not hold up the services or the
+# stack. Installed into /home, so they outlive an instance replacement and keep their own updates (Claude Code
+# updates itself, Codex with npm, the extensions in code-server). A CLI is removed and installed again only when it
+# does not run: missing, half installed, or built for the other architecture after an instance type change. An
+# extension is installed only when missing (README: changing the architecture). All steps share a 15-minute
+# budget (timeout stops the whole process group), and a failure only warns; the next run retries.
+uhome=/home/ec2-user ai_deadline=$((SECONDS + 900))
+as_user() {   # as_user <seconds> <command...>: as ec2-user, stopped after <seconds> or when the budget runs out
+  local cap=$1 left=$((ai_deadline - SECONDS)); shift
+  [ "$left" -gt 0 ] || { log "AI tools: time budget used up, skipping $1" >&2; return 124; }
+  [ "$cap" -le "$left" ] || cap=$left
+  runuser -u ec2-user -- timeout -k 10 "$cap" env HOME=$uhome PATH="$uhome/.local/bin:/usr/local/bin:/usr/bin:/bin" "$@"
+}
+runs() { as_user 30 "$1" --version >/dev/null 2>&1; }
+try3() { local n; for n in 1 2 3; do "$@" && return 0; [ $((ai_deadline - SECONDS)) -gt 20 ] || return 1; sleep 10; done; return 1; }
+claude_install() {
+  # Removed first: the installer keeps a version it already has, even one built for the other architecture
+  # (the config stays in ~/.claude). The installer checks the binary against the sha256 in its release manifest.
+  as_user 30 rm -rf $uhome/.local/bin/claude $uhome/.local/share/claude || true
+  local s; s=$(as_user 120 curl -fsSL --connect-timeout 10 --max-time 60 https://claude.ai/install.sh) && as_user 600 bash -s <<<"$s"
+}
+codex_install() {
+  # Removed first so npm fetches the native package for this architecture again (the config stays in ~/.codex).
+  as_user 120 npm-22 rm -g -q --prefix $uhome/.local @openai/codex >/dev/null 2>&1 || true
+  as_user 300 npm-22 install -g -q --no-audit --no-fund --prefix $uhome/.local @openai/codex
+}
+if ! runs claude; then
+  log "installing Claude Code"
+  { try3 claude_install && runs claude; } || log "warning: Claude Code install failed; the next setup run retries it"
+fi
+if ! runs codex; then
+  log "installing Codex CLI"
+  { try3 codex_install && runs codex; } || log "warning: Codex CLI install failed; the next setup run retries it"
+fi
+exts=$(as_user 60 code-server --list-extensions 2>/dev/null || true)
+for ext in anthropic.claude-code openai.chatgpt; do   # openai.chatgpt is the Codex extension
+  grep -qix "$ext" <<<"$exts" && continue
+  log "installing code-server extension $ext"
+  try3 as_user 300 code-server --install-extension "$ext" \
+    || log "warning: extension $ext install failed; the next setup run retries it"
+done

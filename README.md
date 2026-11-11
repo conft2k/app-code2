@@ -135,6 +135,16 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 
 `git`, `python3` (+ `pip`), `gcc`, `gcc-c++`, `make`, `tmux`, `jq`, AWS CLI v2, Node.js 22(`nodejs22`, `node`·`npm`). remobi가 쓰려고 설치하지만, remobi는 `node-22`를 직접 부르므로 다른 Node.js 버전을 기본으로 바꿔도 됩니다. **Docker는 설치되어 있지 않습니다.**
 
+AI 코딩 도구도 `ec2-user`의 `/home`에 설치합니다. setup.sh는 CLI가 없거나 실행되지 않을 때(`--version` 실패, 예: 설치가 덜 됐거나 인스턴스 타입을 바꿔 아키텍처가 달라졌을 때)만 그 CLI를 지우고 다시 설치합니다. 버전은 Claude Code는 설정한 업데이트 채널(기본 `latest`)의 최신 버전, Codex는 npm의 최신 버전입니다. 설정(`~/.claude`, `~/.codex`)은 그대로 둡니다. 확장은 없을 때만 설치합니다. 실행되는 도구는 건드리지 않으므로, 인스턴스를 교체해도 쓰던 버전과 설정이 남고 업데이트는 각 도구가 합니다. 이 설치는 서비스가 모두 뜨고 스택에 성공을 알린 뒤 맨 마지막에, 모두 합쳐 최대 15분 동안 합니다. 설치에 실패하거나 시간이 모자라면 경고만 남기고, 다음 setup 실행(재부팅, `reconfigure`) 때 다시 설치합니다. 로그인과 모델 설정(예: Bedrock)은 직접 합니다.
+
+아키텍처가 다른 인스턴스 타입(예: `t4g` ↔ `t3`)으로 바꾸면 확장은 자동으로 다시 설치되지 않습니다. 새 인스턴스에서 `code-server --uninstall-extension anthropic.claude-code`, `code-server --uninstall-extension openai.chatgpt`로 지운 뒤 `reconfigure`를 실행하면, 그 아키텍처용으로 다시 설치합니다.
+
+| 도구 | 설치 방법 | 위치 |
+|---|---|---|
+| Claude Code CLI | 공식 설치 스크립트(`https://claude.ai/install.sh`, 최신 버전, 매니페스트의 sha256으로 확인) | `~/.local/bin/claude` |
+| Codex CLI | `npm-22 install -g --prefix ~/.local @openai/codex` | `~/.local/bin/codex` |
+| code-server 확장 | Open VSX의 `anthropic.claude-code`(Claude Code), `openai.chatgpt`(Codex) | `~/.local/share/code-server/extensions` |
+
 필요한 도구는 직접 설치합니다. 인스턴스를 교체하면 `/` 아래는 새로 만들어지므로, 오래 쓸 도구는 `/home` 아래에 설치하는 편이 안전합니다.
 
 | 설치 위치 | 예 | 인스턴스 교체 시 |

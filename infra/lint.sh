@@ -41,7 +41,7 @@ leaks=$(cd .. && echo "$files" | tr '\n' '\0' | xargs -0 grep -nIE \
 leaks=$(grep -vE '@(example\.(com|org|net)|verificationemail\.com)' <<<"$leaks" || true)
 hosts=$(cd .. && echo "$files" | tr '\n' '\0' | xargs -0 grep -ohIE '([A-Za-z0-9-]+\.)+(com|net|org|io|dev|app|me|ai|kr|jp|cloud|xyz)([^A-Za-z0-9-]|$)' \
   | sed -E 's/[^A-Za-z0-9.-]+$//; s/\.+$//' | sort -u \
-  | grep -vE '(^|\.)(example\.(com|net|org)|amazonaws\.com|amazon\.com|amazoncognito\.com|cloudfront\.net|github\.com|githubusercontent\.com|w3\.org|draw\.io|verificationemail\.com)$' || true)
+  | grep -vE '(^|\.)(example\.(com|net|org)|amazonaws\.com|amazon\.com|amazoncognito\.com|cloudfront\.net|github\.com|githubusercontent\.com|w3\.org|draw\.io|claude\.ai|verificationemail\.com)$' || true)
 if [ -n "$leaks$hosts" ]; then
   echo "possible personal data (use example.com, placeholders like vpc-0123...):" >&2
   printf '%s\n' "$leaks" "$hosts" | sed '/^$/d' >&2
