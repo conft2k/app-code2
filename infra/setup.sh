@@ -65,6 +65,11 @@ esac
 work=$(mktemp -d)
 log "start (code-server ${code_server_version}, oauth2-proxy ${oauth2_proxy_version}, remobi ${remobi_version}, $arch)"
 
+# ---- hostname: the stack name, not ip-10-...; cloud-init would set the EC2 name again at boot ----
+host=${stack,,}; host=${host:0:63}; host=${host%%-}
+printf 'preserve_hostname: true\n' | put /etc/cloud/cloud.cfg.d/99-code2-hostname.cfg 644 || true
+[ "$(hostname)" = "$host" ] || hostnamectl set-hostname "$host"
+
 # ---- packages ----
 # nodejs22 and gcc-c++ for remobi (node-pty builds with node-gyp)
 pkgs="git tmux jq gcc gcc-c++ make tar xfsprogs python3-pip amazon-cloudwatch-agent nodejs22 nodejs22-npm"

@@ -124,6 +124,7 @@ export CODE2_SUBNET_ID=subnet-0123...     # private 서브넷, 0.0.0.0/0 → NAT
 |---|---|
 | 인스턴스 | 기본 `t4g.medium` (Graviton2, 2 vCPU, 4 GiB, 버스터블 standard: 평소 vCPU당 20%, 크레딧이 남아 있으면 100%). 4 GiB Graviton 중 가장 저렴합니다. 메모리가 모자라면 `t4g.large`(8 GiB), 그 밖에 `m7g`, `m8g`, `t3`, `m7i` 등 Nitro 타입이면 됩니다(`/home`을 NVMe ID로 찾으므로 `t2`, `m4` 같은 Xen 타입은 `plan`이 거부합니다) |
 | OS | Amazon Linux 2023 (arm64 또는 x86_64, 인스턴스 타입에 맞춤) |
+| 호스트 이름 | 스택 이름(소문자, 예: `code2`). setup.sh가 정하고, cloud-init이 부팅 때 `ip-10-...`으로 되돌리지 않게 `preserve_hostname: true`를 둡니다 |
 | 사용자 | `ec2-user` (sudo 가능), code-server와 SSH 모두 같은 사용자 |
 | 디스크 | `/` 30 GiB gp3, `/home` 50 GiB gp3 (XFS, 레이블 `code2-home`). 둘 다 파라미터로 바꿀 수 있습니다 |
 | code-server | 4.139.1, `127.0.0.1:8080`, 텔레메트리와 업데이트 확인 끔 |
